@@ -1,0 +1,44 @@
+[2026-06-04 16:51:39] === ZO Computer 批量注册 v2 (Linux) ===
+[2026-06-04 16:51:39] 有效邮箱: 25
+[2026-06-04 16:51:39]   amelida35vsrxp601u61w9@outlook.com.txt
+[2026-06-04 16:51:39]   emma86296css4m95phvvo@outlook.com.txt
+[2026-06-04 16:51:39]   hilljulia5es7y81c6u8a@outlook.com.txt
+[2026-06-04 16:51:39]   lilparkevgpa0ns1k4f6xw@outlook.com.txt
+[2026-06-04 16:51:39]   masonhughessrpilumzcc5qzf@outlook.com.txt
+[2026-06-04 16:51:39]   mxoz14sjj48hsrqs4j6c@outlook.com.txt
+[2026-06-04 16:51:39]   mxqm921frtc4uduayqc3d6@outlook.com.txt
+[2026-06-04 16:51:39]   mxvh76gyv2la4auu2t@outlook.com.txt
+[2026-06-04 16:51:39]   reese3447q27hf3y1ktx@outlook.com.txt
+[2026-06-04 16:51:39]   sarawalkerdcj3dy6usidt@outlook.com.txt
+[2026-06-04 16:51:39]   tokens_bushuozaijian2026@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_fishehen5k5rv2xvyirw@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_floraide3rb1508k2xlbbi@hotmail.com_combo.txt
+[2026-06-04 16:51:39]   tokens_kebukeyi2026@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_landsanchehrqvrw49590ycpji@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mallenbb9qdjidg9y5tw1yqd@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mx1282f1687e@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mx40f8e7ef94@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mx4496f269fa@hotmail.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mx738945e98b@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mx9433499602@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mxc60da9b316@hotmail.com_combo.txt
+[2026-06-04 16:51:39]   tokens_mxih36u8zfmxj42v75fid@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_reedemma531lj7zord2i0uok@outlook.com_combo.txt
+[2026-06-04 16:51:39]   tokens_xzx3214675771@outlook.com_combo.txt
+[2026-06-04 16:51:40] Browser launched
+[2026-06-04 16:51:40] 
+── [1/25] amelida35vsrxp601u61w9@outlook.com ──
+[2026-06-04 16:51:40]   [1/7] Signup page
+[2026-06-04 16:51:44]   [2/7] Click email signup
+[2026-06-04 16:51:46]   [3/7] Fill email: amelida35vsrxp601u61w9@outlook.com
+[2026-06-04 16:51:52]   [OK] Email sent
+[2026-06-04 16:51:52]   [4/7] Poll inbox
+[2026-06-04 16:54:54]   ❌ FAIL: 3分钟内未收到魔法链接
+[2026-06-04 16:54:54]   Progress: 0 ok / 1 fail | elapsed 3m
+[2026-06-04 16:54:57] 
+── [2/25] emma86296css4m95phvvo@outlook.com ──
+[2026-06-04 16:54:57]   [1/7] Signup page
+[2026-06-04 16:55:01]   [2/7] Click email signup
+[2026-06-04 16:55:03]   [3/7] Fill email: emma86296css4m95phvvo@outlook.com
+[2026-06-04 16:55:09]   [OK] Email sent
+[2026-06-04 16:55:09]   [4/7] Poll inbox

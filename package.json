@@ -1,8 +1,27 @@
 {
   "dependencies": {
     "express": "^5.2.1",
+    "puppeteer": "^25.1.0",
     "puppeteer-core": "^25.1.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
-  }
+  },
+  "name": "zo-register",
+  "version": "1.0.0",
+  "description": "``` E:\\API获取工具\\ZO注册\\ ├── zo_batch_register.cjs    # 主注册脚本（批量） ├── registered/              # 已注册邮箱存放目录 │   ├── results.jsonl        # 注册结果记录 │   └── *.txt                # 已注册邮箱凭证 └── README.md ```",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xingluoyuankong/ZO-register.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/xingluoyuankong/ZO-register/issues"
+  },
+  "homepage": "https://github.com/xingluoyuankong/ZO-register#readme"
 }
