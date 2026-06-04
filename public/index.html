@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZO 批量注册</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+
+.header { background: #111; border-bottom: 1px solid #222; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header h1 span { color: #6366f1; }
+
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* 统计卡片 */
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 24px; }
+.stat-card { background: #111; border: 1px solid #222; border-radius: 12px; padding: 16px; text-align: center; }
+.stat-card .value { font-size: 32px; font-weight: 700; margin: 4px 0; }
+.stat-card .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+.stat-card.total .value { color: #e0e0e0; }
+.stat-card.pending .value { color: #fbbf24; }
+.stat-card.working .value { color: #6366f1; }
+.stat-card.success .value { color: #22c55e; }
+.stat-card.fail .value { color: #ef4444; }
+
+/* 控制栏 */
+.controls { background: #111; border: 1px solid #222; border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.controls label { font-size: 13px; color: #aaa; }
+.controls select, .controls input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 8px 12px; border-radius: 8px; font-size: 14px; }
+.controls select:focus, .controls input:focus { outline: none; border-color: #6366f1; }
+.btn { padding: 10px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+.btn-start { background: #6366f1; color: white; }
+.btn-start:hover { background: #5558e6; }
+.btn-start:disabled { background: #444; cursor: not-allowed; }
+.btn-stop { background: #ef4444; color: white; }
+.btn-stop:hover { background: #dc2626; }
+.btn-stop:disabled { background: #444; cursor: not-allowed; }
+
+/* Worker 状态 */
+.workers { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.worker { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px 12px; font-size: 12px; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+/* 邮箱列表 */
+.email-list { background: #111; border: 1px solid #222; border-radius: 12px; overflow: hidden; }
+.email-list-header { padding: 12px 20px; border-bottom: 1px solid #222; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; }
+.email-table { width: 100%; border-collapse: collapse; }
+.email-table th { text-align: left; padding: 10px 16px; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #222; background: #0d0d0d; }
+.email-table td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid #1a1a1a; }
+.email-table tr:hover { background: #151515; }
+
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge-pending { background: #422006; color: #fbbf24; }
+.badge-registering { background: #1e1b4b; color: #818cf8; }
+.badge-success { background: #052e16; color: #22c55e; }
+.badge-fail { background: #450a0a; color: #ef4444; }
+
+.handle { color: #6366f1; font-family: monospace; }
+.error { color: #ef4444; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 日志 */
+.log-panel { background: #111; border: 1px solid #222; border-radius: 12px; margin-top: 24px; }
+.log-panel-header { padding: 12px 20px; border-bottom: 1px solid #222; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.log-panel-header .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; animation: pulse 2s infinite; }
+.log-content { height: 240px; overflow-y: auto; padding: 12px 16px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; line-height: 1.8; }
+.log-content .log-time { color: #555; }
+.log-content .log-email { color: #6366f1; }
+.log-content .log-msg { color: #aaa; }
+
+/* 空状态 */
+.empty { text-align: center; padding: 60px 20px; color: #555; }
+.empty .icon { font-size: 48px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>ZO</span> 批量注册</h1>
+  <div style="font-size:12px;color:#555" id="connStatus">● 连接中...</div>
+</div>
+
+<div class="container">
+  <!-- 统计 -->
+  <div class="stats">
+    <div class="stat-card total"><div class="label">总计</div><div class="value" id="sTotal">0</div></div>
+    <div class="stat-card pending"><div class="label">待处理</div><div class="value" id="sPending">0</div></div>
+    <div class="stat-card working"><div class="label">注册中</div><div class="value" id="sWorking">0</div></div>
+    <div class="stat-card success"><div class="label">成功</div><div class="value" id="sSuccess">0</div></div>
+    <div class="stat-card fail"><div class="label">失败</div><div class="value" id="sFail">0</div></div>
+  </div>
+
+  <!-- 控制栏 -->
+  <div class="controls">
+    <label>并发数</label>
+    <select id="concurrency">
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3" selected>3</option>
+      <option value="5">5</option>
+      <option value="8">8</option>
+      <option value="10">10</option>
+    </select>
+    <button class="btn btn-start" id="btnStart" onclick="startBatch()">▶ 开始注册</button>
+    <button class="btn btn-stop" id="btnStop" onclick="stopBatch()" disabled>■ 停止</button>
+    <button class="btn" style="background:#222;color:#aaa" onclick="loadEmails()">↻ 刷新</button>
+    <div style="flex:1"></div>
+    <div id="workerBar" class="workers"></div>
+  </div>
+
+  <!-- 邮箱列表 -->
+  <div class="email-list">
+    <div class="email-list-header">
+      <span>📧 邮箱列表</span>
+      <span id="emailCount" style="color:#888;font-size:12px"></span>
+    </div>
+    <table class="email-table">
+      <thead>
+        <tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th></tr>
+      </thead>
+      <tbody id="emailBody">
+        <tr><td colspan="6" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 日志 -->
+  <div class="log-panel">
+    <div class="log-panel-header">
+      <span>📋 实时日志</span>
+      <span class="dot"></span>
+    </div>
+    <div class="log-content" id="logContent"></div>
+  </div>
+</div>
+
+<script>
+let ws;
+let emails = [];
+
+function connect() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(protocol + '//' + location.host);
+  ws.onopen = () => {
+    document.getElementById('connStatus').innerHTML = '<span style="color:#22c55e">● 已连接</span>';
+  };
+  ws.onclose = () => {
+    document.getElementById('connStatus').innerHTML = '<span style="color:#ef4444">● 已断开</span>';
+    setTimeout(connect, 3000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'init':
+        updateStats(msg.data.stats);
+        updateWorkers(msg.data.workers);
+        setRunning(msg.data.running);
+        if (msg.data.concurrency) document.getElementById('concurrency').value = msg.data.concurrency;
+        break;
+      case 'stats': updateStats(msg.data); break;
+      case 'email_update': updateEmailRow(msg.data); break;
+      case 'worker_update': updateWorkers(msg.data); break;
+      case 'log': addLog(msg.data.email, msg.data.msg); break;
+      case 'batch_start': setRunning(true); addLog('', '🚀 批量注册开始 (并发: ' + msg.data.concurrency + ')'); break;
+      case 'batch_done': setRunning(false); addLog('', '✅ 批量注册完成'); break;
+      case 'batch_stop': setRunning(false); addLog('', '⏹ 已手动停止'); break;
+      case 'error': addLog('', '⚠️ ' + msg.data.msg); break;
+    }
+  };
+}
+
+function updateStats(s) {
+  if (!s) return;
+  document.getElementById('sTotal').textContent = s.total;
+  document.getElementById('sPending').textContent = s.pending;
+  document.getElementById('sWorking').textContent = s.inProgress;
+  document.getElementById('sSuccess').textContent = s.success;
+  document.getElementById('sFail').textContent = s.fail;
+}
+
+function setRunning(running) {
+  document.getElementById('btnStart').disabled = running;
+  document.getElementById('btnStop').disabled = !running;
+}
+
+function updateWorkers(workers) {
+  const bar = document.getElementById('workerBar');
+  bar.innerHTML = workers.map(w =>
+    '<div class="worker">⚡ ' + (w.email ? w.email.split('@')[0].substring(0,12) : w.id) + '</div>'
+  ).join('');
+}
+
+function updateEmailRow(data) {
+  const tr = document.querySelector('tr[data-email="' + data.email + '"]');
+  if (!tr) return;
+  tr.querySelector('.status').innerHTML = badge(data.status);
+  if (data.handle) tr.querySelector('.handle').textContent = data.handle;
+  if (data.progress) tr.querySelector('.progress').textContent = data.progress;
+  if (data.error) tr.querySelector('.err').textContent = data.error;
+}
+
+function badge(status) {
+  const map = { pending: '待处理', registering: '注册中', success: '成功', fail: '失败' };
+  return '<span class="badge badge-' + status + '">' + (map[status] || status) + '</span>';
+}
+
+async function loadEmails() {
+  const resp = await fetch('/api/emails');
+  const data = await resp.json();
+  emails = data.emails;
+  updateStats(data.stats);
+  renderTable();
+}
+
+function renderTable() {
+  const body = document.getElementById('emailBody');
+  if (emails.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty"><div class="icon">📭</div>没有找到邮箱文件</td></tr>';
+    document.getElementById('emailCount').textContent = '';
+    return;
+  }
+  document.getElementById('emailCount').textContent = emails.length + ' 个邮箱';
+  body.innerHTML = emails.map((e, i) =>
+    '<tr data-email="' + e.email + '">' +
+    '<td style="color:#555">' + (i + 1) + '</td>' +
+    '<td style="font-family:monospace;font-size:12px">' + e.email + '</td>' +
+    '<td class="status">' + badge(e.status) + '</td>' +
+    '<td class="handle" style="color:#6366f1">' + (e.handle || '-') + '</td>' +
+    '<td class="progress" style="color:#888">' + (e.progress || '-') + '</td>' +
+    '<td class="err error" title="' + (e.error || '') + '">' + (e.error || '-') + '</td>' +
+    '</tr>'
+  ).join('');
+}
+
+async function startBatch() {
+  const c = parseInt(document.getElementById('concurrency').value);
+  await fetch('/api/concurrency', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ concurrency: c }) });
+  const resp = await fetch('/api/start', { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) addLog('', '⚠️ ' + data.error);
+}
+
+async function stopBatch() {
+  await fetch('/api/stop', { method: 'POST' });
+}
+
+function addLog(email, msg) {
+  const div = document.getElementById('logContent');
+  const time = new Date().toLocaleTimeString('zh-CN');
+  div.innerHTML += '<div><span class="log-time">' + time + '</span> ' +
+    (email ? '<span class="log-email">[' + email.split('@')[0] + ']</span> ' : '') +
+    '<span class="log-msg">' + msg + '</span></div>';
+  div.scrollTop = div.scrollHeight;
+}
+
+// 初始化
+loadEmails();
+connect();
+</script>
+</body>
+</html>
