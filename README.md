@@ -1,17 +1,25 @@
 # ZO Computer 批量注册
 
-## 文件结构
+## 📁 文件结构
 
 ```
-E:\API获取工具\ZO注册\
+ZO-register/
 ├── zo_batch_register.cjs    # 主注册脚本（批量）
-├── registered/              # 已注册邮箱存放目录
-│   ├── results.jsonl        # 注册结果记录
-│   └── *.txt                # 已注册邮箱凭证
-└── README.md
+├── zo_register_playwright.py # Playwright + Stealth 注册脚本
+├── auto-register.sh          # Bash 自动注册脚本
+├── registered/               # 已注册邮箱存放目录
+│   ├── results.jsonl         # 注册结果记录
+│   ├── results.json          # 注册结果 JSON
+│   ├── ACCOUNTS.md           # 账号汇总
+│   ├── SUMMARY.md            # 注册结果汇总
+│   ├── screenshots/          # 失败截图目录
+│   └── *.txt                 # 已注册邮箱凭证
+├── GUIDE.md                  # 踩坑指南
+├── REGISTER_SUCCESS.md       # 成功案例记录
+└── README.md                 # 本文件
 ```
 
-## 邮箱文件格式
+## 🔑 邮箱文件格式
 
 每个 `.txt` 文件，文件名=邮箱地址，内容4段用 `----` 分隔：
 
@@ -19,23 +27,31 @@ E:\API获取工具\ZO注册\
 邮箱----密码----clientId----refreshToken
 ```
 
-## 用法
+## 🚀 快速开始
+
+### 方案一：agent-browser（推荐）
 
 ```bash
-# 批量注册（默认扫描 已经使用 文件夹）
-node zo_batch_register.cjs
-
-# 指定邮箱文件夹
-node zo_batch_register.cjs "C:\path\to\emails"
+# 1. 确保邮箱文件在 extracted_emails/ 目录
+# 2. 运行注册脚本
+python3 zo_register_one.py <邮箱文件路径>
 ```
 
-## 前置条件
+### 方案二：Playwright + Stealth
 
-1. Chrome 浏览器已启动，CDP 端口 64610 已开启
-2. OpenClaw 浏览器已启动（`browser start`）
-3. 邮箱文件已准备好，格式正确
+```bash
+# 批量注册
+python3 zo_register_playwright.py
+```
 
-## 注册流程
+### 方案三：Node.js + Puppeteer
+
+```bash
+# 需要 Chrome CDP 端口 64610 已开启
+node zo_batch_register.cjs
+```
+
+## 📋 注册流程
 
 1. 打开 `https://www.zo.computer/signup`
 2. 点击 "Email me a sign-up link"
@@ -47,7 +63,22 @@ node zo_batch_register.cjs "C:\path\to\emails"
 8. 等待 ZO 计算机启动完成
 9. 点击 "Go to your Zo" → 注册完成
 
-## 输出
+## 📝 输出文件
 
 - `registered/results.jsonl`：每行一个 JSON，包含 email、handle、status、time
-- `registered/*.txt`：注册成功后邮箱凭证自动移入此目录
+- `registered/ACCOUNTS.md`：账号汇总表
+- `registered/screenshots/`：失败截图（用于调试）
+
+## ⚠️ 踩坑记录
+
+详见 [GUIDE.md](./GUIDE.md)
+
+## ✅ 成功案例
+
+详见 [REGISTER_SUCCESS.md](./REGISTER_SUCCESS.md)
+
+## 📊 当前状态
+
+- ✅ 完全成功：1 个邮箱
+- ⚠️ Handle 已保留（待 boot）：3 个邮箱
+- 📧 待注册：20+ 个邮箱

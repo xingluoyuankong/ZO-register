@@ -1,0 +1,56 @@
+[16:48:31] ==================================================
+[16:48:31] Registering: fishehen5k5rv2xvyirw@outlook.com
+[16:48:31] Handle: usero1w5p8
+[16:48:32] [1] Opening signup...
+[16:48:34] [2] Clicking email link button...
+[16:48:36] [3] Filling email...
+[16:48:37] [OK] Email sent at 2026-06-05T16:48:37Z
+[16:48:39] [4] Polling inbox...
+[16:48:45] [OK] Got link: https://www.zo.computer/api/email-login/verify?redirect=%2Fs...
+[16:48:45] [5] Opening magic link...
+[16:48:51] Screenshot: /home/workspace/ZO-register/registered/screenshots/fishehen5k5rv2xvyirw@outlook.com_step5.png
+[16:48:51] [6] Waiting for Turnstile...
+[16:48:54]   [1] https://www.zo.computer/email-login/verify?token=eyJhbGciOiJ | About
+Resources
+Log in
+Sign up
+
+EMAIL LOGIN
+
+Verifying your 
+[16:49:02]   [2] https://www.zo.computer/email-login/verify?token=eyJhbGciOiJ | About
+Resources
+Log in
+Sign up
+
+EMAIL LOGIN
+
+Verifying your 
+[16:49:10]   [3] https://www.zo.computer/email-login/verify?token=eyJhbGciOiJ | About
+Resources
+Log in
+Sign up
+
+EMAIL LOGIN
+
+Verifying your 
+[16:49:18]   [4] https://www.zo.computer/email-login/verify?token=eyJhbGciOiJ | About
+Resources
+Log in
+Sign up
+
+EMAIL LOGIN
+
+Redirecting...
+
+[16:49:26]   [5] https://www.zo.computer/email-login/verify?token=eyJhbGciOiJ | About
+Resources
+Log in
+Sign up
+
+EMAIL LOGIN
+
+Redirecting...
+
+[16:49:31] [FAIL] Token expired!
+[16:49:31] Screenshot: /home/workspace/ZO-register/registered/screenshots/fishehen5k5rv2xvyirw@outlook.com_FAIL_expired.png
