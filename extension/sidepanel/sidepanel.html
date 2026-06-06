@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>ZO 注册助手</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <h1><span>ZO</span> 注册助手</h1>
+      <span id="statusBadge" class="badge badge-idle">待命</span>
+    </div>
+    <p id="statusText">准备就绪</p>
+  </header>
+
+  <main>
+    <div class="stats">
+      <div class="stat"><div class="val" id="sTotal">0</div><div class="lbl">总计</div></div>
+      <div class="stat s-pending"><div class="val" id="sPending">0</div><div class="lbl">待处理</div></div>
+      <div class="stat s-working"><div class="val" id="sWorking">0</div><div class="lbl">注册中</div></div>
+      <div class="stat s-success"><div class="val" id="sSuccess">0</div><div class="lbl">成功</div></div>
+      <div class="stat s-fail"><div class="val" id="sFail">0</div><div class="lbl">失败</div></div>
+    </div>
+
+    <div class="controls">
+      <button class="btn btn-primary" id="btnStart">▶ 开始批量</button>
+      <button class="btn btn-danger" id="btnStop" disabled>■ 停止</button>
+      <button class="btn btn-secondary btn-sm" id="btnReset">↻ 重置失败</button>
+      <button class="btn btn-secondary btn-sm" id="btnClearSuccess">清理成功</button>
+      <button class="btn btn-secondary btn-sm" id="btnClearFail">清理失败</button>
+      <button class="btn btn-secondary btn-sm" id="btnClearDoneFail">清理成功+失败</button>
+      <button class="btn btn-secondary btn-sm" id="btnClear">🗑 清空</button>
+      <div style="flex:1"></div>
+      <label>模式</label>
+      <select id="concurrency" disabled>
+        <option value="1" selected>串行</option>
+      </select>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><div class="eyebrow">IMPORT</div><h2>📧 邮箱导入</h2></div>
+        <span id="emailCount" style="font-size:11px;color:#555">0 个</span>
+      </div>
+      <div class="panel-body">
+        <div class="import-area">
+          <textarea id="emailTextarea" placeholder="每行一个邮箱，格式：&#10;email@outlook.com----password----clientId----refreshToken"></textarea>
+          <input id="emailFileInput" type="file" accept=".txt,.csv,.log" multiple style="display:none">
+          <input id="emailFolderInput" type="file" accept=".txt,.csv,.log" webkitdirectory multiple style="display:none">
+          <div class="import-actions">
+            <button class="btn btn-secondary btn-sm" id="btnFileImport">📄 导入文件</button>
+            <button class="btn btn-secondary btn-sm" id="btnFolderImport">📁 导入文件夹</button>
+            <button class="btn btn-secondary btn-sm" id="btnPaste">📋 粘贴</button>
+            <button class="btn btn-primary btn-sm" id="btnLoad">⬇ 加载邮箱</button>
+            <button class="btn btn-primary btn-sm" id="btnLoadStart">▶ 加载并串行注册</button>
+            <button class="btn btn-secondary btn-sm" id="btnExport">📤 导出</button>
+          </div>
+          <div class="import-hint">格式：email----password----clientId----refreshToken；支持多选 .txt/.csv/.log 文件和导入整个文件夹，自动去重</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><div class="eyebrow">ACCOUNTS</div><h2>📋 邮箱列表</h2></div>
+      </div>
+      <div class="panel-body">
+        <div class="email-list" id="emailList">
+          <div style="text-align:center;padding:30px;color:#333">请先导入邮箱</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><div class="eyebrow">LOG</div><h2>📋 运行日志</h2></div>
+        <button class="btn btn-secondary btn-sm" id="btnClearLog">清空</button>
+      </div>
+      <div class="panel-body">
+        <div class="log" id="logBody"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

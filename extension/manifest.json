@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "ZO 注册助手",
+  "version": "1.0.0",
+  "description": "ZO Computer 批量邮箱注册浏览器插件",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "webNavigation",
+    "cookies",
+    "browsingData",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://www.zo.computer/*",
+    "https://zo.computer/*",
+    "https://login.microsoftonline.com/*",
+    "https://graph.microsoft.com/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.zo.computer/*", "https://zo.computer/*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ZO 注册助手"
+  }
+}

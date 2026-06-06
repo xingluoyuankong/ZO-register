@@ -1,0 +1,62 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0a0a; color: #e0e0e0; font-family: 'Segoe UI', -apple-system, sans-serif; font-size: 13px; }
+header { background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 16px 20px; border-bottom: 1px solid #333; }
+header h1 { font-size: 18px; font-weight: 700; color: #fff; }
+header h1 span { color: #6366f1; }
+header p { font-size: 12px; color: #888; margin-top: 4px; }
+.header-row { display: flex; justify-content: space-between; align-items: center; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge-idle { background: #1c1917; color: #a8a29e; }
+.badge-running { background: #1e1b4b; color: #818cf8; animation: pulse 1.5s infinite; }
+.badge-done { background: #052e16; color: #4ade80; }
+.badge-error { background: #1c0a0a; color: #f87171; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+main { padding: 12px 16px; }
+.panel { background: #111; border: 1px solid #1a1a1a; border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+.panel-head { padding: 12px 16px; border-bottom: 1px solid #1a1a1a; display: flex; justify-content: space-between; align-items: center; }
+.panel-head h2 { font-size: 14px; font-weight: 600; }
+.panel-head .eyebrow { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 1px; }
+.panel-body { padding: 12px 16px; }
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px; }
+.stat { background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 8px; padding: 10px 8px; text-align: center; }
+.stat .val { font-size: 22px; font-weight: 700; }
+.stat .lbl { font-size: 9px; color: #555; text-transform: uppercase; margin-top: 2px; }
+.s-pending .val { color: #eab308; }
+.s-working .val { color: #6366f1; }
+.s-success .val { color: #22c55e; }
+.s-fail .val { color: #ef4444; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.btn { padding: 8px 16px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; }
+.btn-primary { background: #6366f1; color: #fff; }
+.btn-primary:hover { background: #5558e6; }
+.btn-primary:disabled { background: #444; cursor: not-allowed; }
+.btn-danger { background: #ef4444; color: #fff; }
+.btn-danger:hover { background: #dc2626; }
+.btn-danger:disabled { background: #444; cursor: not-allowed; }
+.btn-secondary { background: #1a1a1a; color: #aaa; border: 1px solid #333; }
+.btn-secondary:hover { background: #333; }
+.btn-sm { padding: 5px 12px; font-size: 11px; }
+select { background: #1a1a1a; color: #e0e0e0; border: 1px solid #333; padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+label { font-size: 11px; color: #888; }
+.import-area textarea { width: 100%; height: 100px; background: #0d0d0d; color: #e0e0e0; border: 1px solid #333; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 11px; resize: vertical; }
+.import-area textarea:focus { outline: none; border-color: #6366f1; }
+.import-area textarea::placeholder { color: #333; }
+.import-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.import-hint { font-size: 10px; color: #555; margin-top: 6px; }
+.email-list { max-height: 250px; overflow-y: auto; }
+.email-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #0d0d0d; }
+.email-item:last-child { border-bottom: none; }
+.email-item .addr { flex: 1; font-family: monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ccc; }
+.email-item .badge { font-size: 9px; }
+.email-item .btn { padding: 3px 8px; font-size: 10px; }
+.email-item .handle { font-size: 10px; color: #6366f1; }
+.email-item .error { font-size: 10px; color: #ef4444; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log { background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 8px; max-height: 200px; overflow-y: auto; padding: 10px; font-family: monospace; font-size: 11px; line-height: 1.6; }
+.log .entry { border-bottom: 1px solid #111; padding: 1px 0; }
+.log .ts { color: #333; } .log .em { color: #6366f1; } .log .msg { color: #888; }
+.log .err { color: #ef4444; } .log .ok { color: #22c55e; }
+
+.email-item .progress { font-size: 10px; color: #eab308; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.email-item .del-btn { padding: 3px 8px; font-size: 10px; }
+.email-item .reg-btn { min-width: 42px; }
