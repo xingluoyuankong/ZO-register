@@ -292,7 +292,10 @@ function isFatalMailError(msg) {
   // AADSTS50146: 应用需要满足条件访问策略
   // AADSTS700016: 应用已被禁用
   // AADSTS7000222: 账号已禁用
-  return /AADSTS70000|AADSTS50196|AADSTS50146|AADSTS700016|AADSTS7000222|service abuse mode|request loop|account.*disabled/i.test(msg);
+  // invalid_client: clientId 无效
+  // invalid_grant: refreshToken 无效/过期
+  // AADSTS7000024: refreshToken 已过期
+  return /AADSTS70000|AADSTS50196|AADSTS50146|AADSTS700016|AADSTS7000222|AADSTS7000024|invalid_client|invalid_grant|service abuse mode|request loop|account.*disabled/i.test(msg);
 }
 
 async function pollMagicLink(clientId, refreshToken, afterTime, email) {
