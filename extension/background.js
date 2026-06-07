@@ -7,6 +7,7 @@ var state = {
   running: false,
   stopRequested: false,
   concurrency: 1,
+  _registerGen: 0,
   stats: { total: 0, pending: 0, success: 0, fail: 0, inProgress: 0 }
 };
 
@@ -120,11 +121,7 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
     if (msg.type === "stop_batch") {
       state.stopRequested = true;
       state.running = false;
-      state.emails.filter(function(e) { return e.status === "registering"; }).forEach(function(e) {
-        e.status = "pending";
-        e.progress = "已停止，可重新开始";
-      });
-      updateStats();
+      saveState();
       broadcast({ type: "batch_stop" });
       doLog("", "■ 已请求停止，当前流程会在下一次检查点中断");
       sendResponse({ ok: true });
@@ -413,6 +410,7 @@ async function sendToTabRaw(tabId, msg) {
 async function doRegisterOne(emailItem) {
   var email = emailItem.email;
   var singleMode = !state.running;
+  var registerGen = ++state._registerGen;
   if (singleMode) { state.running = true; state.stopRequested = false; }
   try {
     checkStop(email);
@@ -488,7 +486,7 @@ async function doRegisterOne(emailItem) {
     doLog(email, "[统计] 成功: " + state.emails.filter(function(e2){return e2.status==="success"}).length + ", 失败: " + state.emails.filter(function(e2){return e2.status==="fail"}).length + ", 剩余待处理: " + state.emails.filter(function(e2){return e2.status==="pending"}).length);
     return { ok: false, error: errorMsg };
   } finally {
-    if (singleMode) {
+    if (singleMode && state._registerGen === registerGen) {
       state.running = false;
       state.stopRequested = false;
       broadcast({ type: "batch_done" });

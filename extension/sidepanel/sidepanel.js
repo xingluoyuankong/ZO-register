@@ -55,8 +55,8 @@
       html += badgeHtml(e.status);
       if (e.progress) html += '<span class="progress" title="' + escapeHtml(e.progress) + '">' + escapeHtml(e.progress.substring(0, 28)) + '</span>';
       if (e.error) html += '<span class="error" title="' + escapeHtml(e.error) + '">' + escapeHtml(e.error.substring(0, 20)) + '</span>';
-      var dis = (isRunning || e.status === 'registering' || e.status === 'success') ? ' disabled' : '';
-      var delDis = (isRunning || e.status === 'registering') ? ' disabled' : '';
+      var dis = (e.status === 'registering' || e.status === 'success') ? ' disabled' : '';
+      var delDis = (e.status === 'registering') ? ' disabled' : '';
       var lbl = e.status === 'registering' ? '...' : e.status === 'success' ? '✓' : e.status === 'fail' ? '重试' : '注册';
       html += '<button class="btn btn-secondary btn-sm reg-btn" data-email="' + escapeHtml(e.email) + '"' + dis + '>' + lbl + '</button>';
       html += '<button class="btn btn-danger btn-sm del-btn" data-email="' + escapeHtml(e.email) + '"' + delDis + '>删除</button>';
