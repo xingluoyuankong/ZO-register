@@ -193,10 +193,14 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
     }
 
     if (msg.type === "clear_all") {
-      state.emails = [];
-      state.running = false;
       state.stopRequested = true;
-      updateStats();
+      // 不立即清空，让 doRegisterOne 在下一个 checkStop 自然退出
+      // 延迟清空以避免 doRegisterOne 持有的引用悬空
+      setTimeout(function() {
+        state.emails = [];
+        state.running = false;
+        updateStats();
+      }, 2000);
       sendResponse({ ok: true });
       return false;
     }
