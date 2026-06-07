@@ -342,6 +342,18 @@
     document.getElementById('btnClearLog').addEventListener('click', function() {
       document.getElementById('logBody').innerHTML = '';
     });
+
+    document.getElementById('btnClearAll').addEventListener('click', function() {
+      if (!emails.length) { addLog('', '📭 邮箱列表已为空'); return; }
+      if (!confirm('确认清空所有 ' + emails.length + ' 个邮箱？')) return;
+      sendMsg({ type: 'clear_all' }, function() {
+        emails = [];
+        renderEmails();
+        updateStats({ total: 0, pending: 0, success: 0, fail: 0, inProgress: 0 });
+        document.getElementById('emailTextarea').value = '';
+        addLog('', '🗑 已清空所有邮箱');
+      });
+    });
   }
 
   // ========== 监听 background 推送 ==========
