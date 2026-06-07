@@ -127,13 +127,21 @@
     const url = location.href;
     const txt = getText(1000);
 
-    // 已到达 profile/handle 设置页面，验证完成
+    // 已到达 profile/handle 设置页面，验证完成（新注册流程）
     if (/set up your profile|choose your handle|display name/i.test(txt)) {
       return { ok: true, done: true, stage: "profile", url: location.href };
     }
 
+    // 检测已注册邮箱：直接跳到主界面（xxx.zo.computer 而非 www.zo.computer）
+    var hostname = '';
+    try { hostname = location.hostname.toLowerCase(); } catch (e) {}
+    var isSubdomain = hostname && hostname.endsWith('.zo.computer') && hostname !== 'www.zo.computer' && hostname !== 'zo.computer';
+    var hasMainUI = /dashboard|welcome|explore|home|zo space|files|chat|automations|your conversations/i.test(txt);
+    if (isSubdomain && hasMainUI && !/booting|starting|loading|%/i.test(txt)) {
+      return { ok: true, done: true, stage: "registered", url: location.href, text: "邮箱已注册过，直接进入主界面" };
+    }
+
     // URL 离开 verify/email-login，且不是普通 signup 页，才按跳转完成处理
-    // 如果跳到 /signup，必须等页面文字出现 choose handle/profile 才算验证完成
     if (/zo\.computer/i.test(url) && !/\/email-login\/verify|\/verify|\/signup/.test(url)) {
       return { ok: true, done: true, stage: "left_verify", url: location.href };
     }
@@ -285,10 +293,21 @@
     const txt = getText(1000);
     const lower = txt.toLowerCase();
     const urlNow = location.href.toLowerCase();
-    const stillOnSignupFlow = /\/signup|\/email-login|\/verify/.test(urlNow);
+    // 只匹配 www.zo.computer 或 zo.computer 的 signup 流程，不匹配 xxx.zo.computer 子域名
+    const hostname = location.hostname.toLowerCase();
+    const isSubdomain = hostname.endsWith('.zo.computer') && hostname !== 'www.zo.computer' && hostname !== 'zo.computer';
+    const stillOnSignupFlow = !isSubdomain && /\/signup|\/email-login|\/verify/.test(urlNow);
+
+    // 已注册邮箱：已到达主界面（xxx.zo.computer 子域名）
+    if (isSubdomain &&
+        (/dashboard|welcome|explore|home/i.test(lower) ||
+         (/zo space/i.test(txt) && /files/i.test(txt) && /chat/i.test(txt)) ||
+         /your conversations|start a new conversation/i.test(txt)) &&
+        !/booting|starting|loading|%/i.test(txt)) {
+      return { ok: true, done: true, stage: "registered", url: location.href, text: "邮箱已注册过，直接进入主界面" };
+    }
 
     // 到达真正主界面：不能仍在 signup/email-login/verify 流程里。
-    // ZO 当前主页文案包括：Zo Space / Files / Chat / Automations / Your Conversations。
     if (!stillOnSignupFlow &&
         (/dashboard|welcome\s*back|explore|home/i.test(lower) ||
          (/zo space/i.test(txt) && /files/i.test(txt) && /chat/i.test(txt)) ||

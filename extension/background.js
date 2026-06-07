@@ -46,6 +46,7 @@ function updateStats() {
   state.stats.pending = state.emails.filter(function(e) { return e.status === "pending"; }).length;
   state.stats.success = state.emails.filter(function(e) { return e.status === "success"; }).length;
   state.stats.fail = state.emails.filter(function(e) { return e.status === "fail"; }).length;
+  state.stats.registered = state.emails.filter(function(e) { return e.status === "registered"; }).length;
   state.stats.inProgress = state.emails.filter(function(e) { return e.status === "registering"; }).length;
   saveState();
   broadcast({ type: "stats", data: state.stats });
@@ -151,6 +152,9 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
       }
       if (item.status === "success") {
         sendResponse({ ok: false, error: "该邮箱已成功；如需重来请先删除后重新导入" }); return false;
+      }
+      if (item.status === "registered") {
+        sendResponse({ ok: false, error: "该邮箱已注册过；如需重来请先删除后重新导入" }); return false;
       }
       item.status = "pending";
       item.error = "";
@@ -489,6 +493,15 @@ async function doRegisterOne(emailItem) {
     stepLog(email, 9, "处理条款、Go to your Zo、手机号跳过等 Onboarding");
     resp = await waitForOnboardingFlow(tab.id, email);
     if (!resp || !resp.ok) throw new Error("Onboarding: " + (resp ? resp.error : "无响应"));
+
+    // 已注册邮箱：直接进入主界面，跳过新注册流程
+    if (resp.stage === "registered") {
+      stepLog(email, 10, "邮箱已注册过，直接进入主界面", "success");
+      setEmailStatus(email, "registered", { url: resp.url, progress: "[10/10] 已注册" });
+      doLog(email, "ℹ️ 邮箱已注册过: " + resp.url, "success");
+      doLog(email, "[统计] 新注册: " + state.emails.filter(function(e){return e.status==="success"}).length + ", 已注册: " + state.emails.filter(function(e){return e.status==="registered"}).length + ", 失败: " + state.emails.filter(function(e){return e.status==="fail"}).length + ", 剩余: " + state.emails.filter(function(e){return e.status==="pending"}).length);
+      return { ok: true, registered: true };
+    }
 
     stepLog(email, 10, "注册完成：已到达 ZO 主界面", "success");
     setEmailStatus(email, "success", { handle: handle, url: resp.url, progress: "[10/10] 注册完成" });

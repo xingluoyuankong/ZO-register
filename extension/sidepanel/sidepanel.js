@@ -10,8 +10,8 @@
   var isRunning = false;
 
   function badgeHtml(s) {
-    var m = { pending: '⏳ 待处理', registering: '⚡ 注册中', success: '✅ 成功', fail: '❌ 失败' };
-    var cls = s === 'registering' ? 'running' : s === 'success' ? 'done' : s === 'fail' ? 'error' : 'idle';
+    var m = { pending: '⏳ 待处理', registering: '⚡ 注册中', success: '✅ 成功', fail: '❌ 失败', registered: '🔄 已注册' };
+    var cls = s === 'registering' ? 'running' : s === 'success' ? 'done' : s === 'fail' ? 'error' : s === 'registered' ? 'done' : 'idle';
     return '<span class="badge badge-' + cls + '">' + (m[s] || s) + '</span>';
   }
 
@@ -20,7 +20,7 @@
     document.getElementById('sTotal').textContent = stats.total || 0;
     document.getElementById('sPending').textContent = stats.pending || 0;
     document.getElementById('sWorking').textContent = stats.inProgress || 0;
-    document.getElementById('sSuccess').textContent = stats.success || 0;
+    document.getElementById('sSuccess').textContent = (stats.success || 0) + (stats.registered || 0);
     document.getElementById('sFail').textContent = stats.fail || 0;
   }
 
@@ -55,7 +55,7 @@
       html += badgeHtml(e.status);
       if (e.progress) html += '<span class="progress" title="' + escapeHtml(e.progress) + '">' + escapeHtml(e.progress.substring(0, 28)) + '</span>';
       if (e.error) html += '<span class="error" title="' + escapeHtml(e.error) + '">' + escapeHtml(e.error.substring(0, 20)) + '</span>';
-      var dis = (e.status === 'registering' || e.status === 'success') ? ' disabled' : '';
+      var dis = (e.status === 'registering' || e.status === 'success' || e.status === 'registered') ? ' disabled' : '';
       var delDis = (e.status === 'registering') ? ' disabled' : '';
       var lbl = e.status === 'registering' ? '...' : e.status === 'success' ? '✓' : e.status === 'fail' ? '重试' : '注册';
       html += '<button class="btn btn-secondary btn-sm reg-btn" data-email="' + escapeHtml(e.email) + '"' + dis + '>' + lbl + '</button>';
@@ -233,9 +233,9 @@
       });
     });
 
-    document.getElementById('btnClearSuccess').addEventListener('click', function() { clearByStatus(['success'], '清理成功邮箱'); });
+    document.getElementById('btnClearSuccess').addEventListener('click', function() { clearByStatus(['success', 'registered'], '清理成功邮箱'); });
     document.getElementById('btnClearFail').addEventListener('click', function() { clearByStatus(['fail'], '清理失败邮箱'); });
-    document.getElementById('btnClearDoneFail').addEventListener('click', function() { clearByStatus(['success', 'fail'], '清理成功和失败邮箱'); });
+    document.getElementById('btnClearDoneFail').addEventListener('click', function() { clearByStatus(['success', 'registered', 'fail'], '清理成功+失败邮箱'); });
 
     document.getElementById('btnClear').addEventListener('click', function() {
       if (!confirm('确认清空所有邮箱？')) return;
