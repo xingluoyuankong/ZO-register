@@ -134,6 +134,19 @@
         document.getElementById('btnStart').disabled = true;
         document.getElementById('btnStop').disabled = false;
       }
+      // 检测僵尸邮箱：SW 重启后 registering 但无进程
+      if (!resp.running) {
+        var stale = emails.filter(function(e) { return e.status === 'registering'; });
+        if (stale.length > 0) {
+          stale.forEach(function(e) {
+            e.status = 'pending';
+            e.error = '上次注册中断';
+            e.progress = '';
+          });
+          renderEmails();
+          addLog('', '⚠ 发现 ' + stale.length + ' 个中断的邮箱，已重置为待处理');
+        }
+      }
     });
   }
 
