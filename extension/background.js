@@ -528,7 +528,7 @@ async function waitForVerifyStep(tabId, email) {
     tick++;
     try { await ensureContentScript(tabId); } catch (e) {}
 
-    var resp = await sendToTab(tabId, { type: 'zo_step', step: 'verify_tick' }, 15000);
+    var resp = await sendToTab(tabId, { type: 'zo_step', step: 'verify_tick' }, 8000);
     if (!resp || !resp.ok) {
       var err = resp ? resp.error : '无响应';
       doLog(email, '[验证] 本轮通信失败，重新注入后继续: ' + err);
@@ -562,7 +562,7 @@ async function waitForOnboardingFlow(tabId, email) {
     // 页面跳转或 BFCache 可能让 content-script 消息通道断开；每轮都先确保脚本存在
     try { await ensureContentScript(tabId); } catch (e) {}
 
-    var resp = await sendToTab(tabId, { type: 'zo_step', step: 'onboarding_tick' }, 15000);
+    var resp = await sendToTab(tabId, { type: 'zo_step', step: 'onboarding_tick' }, 8000);
     if (!resp || !resp.ok) {
       var err = resp ? resp.error : '无响应';
       doLog(email, '[Onboarding] 本轮通信失败，重新注入后继续: ' + err);
