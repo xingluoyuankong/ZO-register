@@ -528,6 +528,7 @@ async function waitForVerifyStep(tabId, email) {
     if (!resp || !resp.ok) {
       var err = resp ? resp.error : '无响应';
       doLog(email, '[验证] 本轮通信失败，重新注入后继续: ' + err);
+      checkStop(email);
       await sleepWithStop(VERIFY_POLL_MS, email);
       continue;
     }
@@ -561,6 +562,7 @@ async function waitForOnboardingFlow(tabId, email) {
     if (!resp || !resp.ok) {
       var err = resp ? resp.error : '无响应';
       doLog(email, '[Onboarding] 本轮通信失败，重新注入后继续: ' + err);
+      checkStop(email);
       try { await ensureContentScript(tabId); } catch (e2) {}
       continue;
     }
