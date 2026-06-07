@@ -273,6 +273,17 @@ async function findMagicLink(accessToken, afterTime) {
   return null;
 }
 
+// 判断是否为不可恢复的风控/滥用错误（应立即标记失败，跳过该邮箱）
+function isFatalMailError(msg) {
+  if (!msg) return false;
+  // AADSTS70000: 账号被标记为 service abuse mode
+  // AADSTS50196: 服务器因请求循环终止操作
+  // AADSTS50146: 应用需要满足条件访问策略
+  // AADSTS700016: 应用已被禁用
+  // AADSTS7000222: 账号已禁用
+  return /AADSTS70000|AADSTS50196|AADSTS50146|AADSTS700016|AADSTS7000222|service abuse mode|request loop|account.*disabled/i.test(msg);
+}
+
 async function pollMagicLink(clientId, refreshToken, afterTime, email) {
   var rt = refreshToken;
   var deadline = Date.now() + 180000;
@@ -283,7 +294,13 @@ async function pollMagicLink(clientId, refreshToken, afterTime, email) {
       rt = r.newRefreshToken;
       var link = await findMagicLink(r.accessToken, afterTime);
       if (link) return { link: link, newRefreshToken: rt };
-    } catch (e) { doLog(email, "轮询错误: " + e.message, "error"); }
+    } catch (e) {
+      doLog(email, "轮询错误: " + e.message, "error");
+      // 风控/滥用错误立即终止，不浪费时间重试
+      if (isFatalMailError(e.message)) {
+        throw new Error("邮箱被风控: " + e.message.split(" Trace ID")[0].split(" Correlation")[0].trim());
+      }
+    }
     await sleepWithStop(3000, email);
   }
   return null;
@@ -457,6 +474,7 @@ async function doRegisterOne(emailItem) {
     stepLog(email, 10, "注册完成：已到达 ZO 主界面", "success");
     setEmailStatus(email, "success", { handle: handle, url: resp.url, progress: "[10/10] 注册完成" });
     doLog(email, "✅ 全部流程完成! " + resp.url, "success");
+    doLog(email, "[统计] 成功: " + state.emails.filter(function(e){return e.status==="success"}).length + ", 失败: " + state.emails.filter(function(e){return e.status==="fail"}).length + ", 剩余待处理: " + state.emails.filter(function(e){return e.status==="pending"}).length);
     return { ok: true };
   } catch (e) {
     if (e.message === "用户已停止") {
@@ -464,9 +482,11 @@ async function doRegisterOne(emailItem) {
       setEmailStatus(email, "pending", { error: "", progress: "已停止，可重新开始" });
       return { ok: false, stopped: true };
     }
-    doLog(email, "失败: " + e.message, "error");
-    setEmailStatus(email, "fail", { error: e.message });
-    return { ok: false, error: e.message };
+    var errorMsg = e.message || "未知错误";
+    doLog(email, "❌ 失败: " + errorMsg, "error");
+    setEmailStatus(email, "fail", { error: errorMsg });
+    doLog(email, "[统计] 成功: " + state.emails.filter(function(e2){return e2.status==="success"}).length + ", 失败: " + state.emails.filter(function(e2){return e2.status==="fail"}).length + ", 剩余待处理: " + state.emails.filter(function(e2){return e2.status==="pending"}).length);
+    return { ok: false, error: errorMsg };
   } finally {
     if (singleMode) {
       state.running = false;
