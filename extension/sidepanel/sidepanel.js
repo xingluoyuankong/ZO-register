@@ -20,7 +20,8 @@
     document.getElementById('sTotal').textContent = stats.total || 0;
     document.getElementById('sPending').textContent = stats.pending || 0;
     document.getElementById('sWorking').textContent = stats.inProgress || 0;
-    document.getElementById('sSuccess').textContent = (stats.success || 0) + (stats.registered || 0);
+    document.getElementById('sSuccess').textContent = stats.success || 0;
+    document.getElementById('sRegistered').textContent = stats.registered || 0;
     document.getElementById('sFail').textContent = stats.fail || 0;
   }
 
@@ -233,7 +234,8 @@
       });
     });
 
-    document.getElementById('btnClearSuccess').addEventListener('click', function() { clearByStatus(['success', 'registered'], '清理成功邮箱'); });
+    document.getElementById('btnClearSuccess').addEventListener('click', function() { clearByStatus(['success'], '清理成功邮箱'); });
+    document.getElementById('btnClearRegistered').addEventListener('click', function() { clearByStatus(['registered'], '清理已注册邮箱'); });
     document.getElementById('btnClearFail').addEventListener('click', function() { clearByStatus(['fail'], '清理失败邮箱'); });
     document.getElementById('btnClearDoneFail').addEventListener('click', function() { clearByStatus(['success', 'registered', 'fail'], '清理成功+失败邮箱'); });
 
