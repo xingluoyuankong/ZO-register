@@ -82,6 +82,20 @@ function saveState() {
   } catch (e) {}
 }
 
+// SW 启动恢复：上次 Service Worker 被杀时 registering 状态的邮箱会变成僵尸
+function recoverStaleEmails() {
+  var stale = state.emails.filter(function(e) { return e.status === "registering"; });
+  if (stale.length > 0) {
+    stale.forEach(function(e) {
+      e.status = "pending";
+      e.error = "上次注册中断（SW 重启）";
+      e.progress = "";
+    });
+    updateStats();
+    doLog("", "⚠ 检测到 " + stale.length + " 个邮箱上次注册中断，已自动重置为待处理");
+  }
+}
+
 // 消息处理
 chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
   try {
@@ -588,4 +602,14 @@ chrome.action.onClicked.addListener(function(tab) {
 chrome.sidePanel.setOptions({ path: "sidepanel/sidepanel.html", enabled: true }).catch(function() {});
 
 console.log("[ZO] Background started");
+
+// SW 启动时从 storage 恢复状态，然后清理僵尸邮箱
+chrome.storage.local.get({ zo_emails: [], zo_config: {} }, function(data) {
+  if (data.zo_emails && data.zo_emails.length > 0) {
+    state.emails = data.zo_emails;
+    state.concurrency = 1;
+    recoverStaleEmails();
+    doLog("", "✅ 已从存储恢复 " + state.emails.length + " 个邮箱");
+  }
+});
 
