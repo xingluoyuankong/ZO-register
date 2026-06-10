@@ -8,6 +8,18 @@ async function main() {
   const page = pages[0];
   await page.setViewport({ width: 1440, height: 900 });
   
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
+  
   // 当前页面应该是 ZO 的验证页面
   console.log("Current URL:", page.url());
   

@@ -42,6 +42,28 @@
 
     <div class="panel">
       <div class="panel-head">
+        <div><div class="eyebrow">KEEP-ALIVE</div><h2>🟢 自动保活</h2></div>
+      </div>
+      <div class="panel-body">
+        <div class="keepalive-area">
+          <div class="keepalive-controls">
+            <button class="btn btn-secondary" id="btnKeepalive">▶ 开启保活</button>
+            <span id="keepaliveStatus" class="keepalive-status">已关闭</span>
+          </div>
+          <div class="keepalive-info">
+            <span id="keepaliveLastSent">上次发送: --</span>
+            <span id="keepaliveCount">已发送: 0 条</span>
+          </div>
+          <div id="keepaliveCountdown" class="keepalive-countdown" style="display:none">
+            距下次发送: <span id="countdownTime">30:00</span>
+          </div>
+          <div class="keepalive-hint">每30分钟自动在ZO主界面发送一条随机简单问题，保持账号活跃。可随时手动关闭。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
         <div><div class="eyebrow">IMPORT</div><h2>📧 邮箱导入</h2></div>
       </div>
       <div class="panel-body">

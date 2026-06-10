@@ -1,0 +1,18 @@
+[
+  {
+    "email": "your-email1@outlook.com",
+    "password": "",
+    "clientId": "your-client-id",
+    "refreshToken": "your-refresh-token",
+    "handle": "yourhandle1",
+    "zoUrl": "https://yourhandle1.zo.computer"
+  },
+  {
+    "email": "your-email2@outlook.com",
+    "password": "",
+    "clientId": "your-client-id",
+    "refreshToken": "your-refresh-token",
+    "handle": "yourhandle2",
+    "zoUrl": "https://yourhandle2.zo.computer"
+  }
+]

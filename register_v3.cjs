@@ -24,7 +24,19 @@ async function main() {
   const pages = await browser.pages();
   const page = pages[0];
   await page.setViewport({ width: 1440, height: 900 });
-  
+
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
+
   // ========== Step 1: 打开注册页，填写邮箱 ==========
   console.log("\n[Step 1] Opening ZO signup...");
   await page.goto("https://www.zo.computer/signup", { waitUntil: "networkidle2", timeout: 30000 });
@@ -148,6 +160,27 @@ async function main() {
   console.log("Body:", bodyText.substring(0, 200));
   
   if (/verifying|browser check|complete the browser/i.test(bodyText)) {
+    // ★ 先尝试通过 turnstile API 获取令牌
+    const tsResult = await page.evaluate(() => {
+      try {
+        if (typeof turnstile !== 'undefined') {
+          const res = turnstile.getResponse();
+          if (res) {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) {
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(input, res);
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return { ok: true, len: res.length };
+          }
+          try { turnstile.reset(); } catch(e) {}
+        }
+      } catch(e) {}
+      return { ok: false };
+    }).catch(() => ({ ok: false }));
+    if (tsResult.ok) console.log("  [Turnstile] Token obtained! len=" + tsResult.len);
+
     console.log("[Step 4] Clicking 'Continue in browser'...");
     await page.evaluate(() => {
       const all = document.querySelectorAll("button, a, div, span");

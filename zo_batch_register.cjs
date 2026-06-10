@@ -11,6 +11,19 @@ const puppeteer = require("E:\\API获取工具\\ZO注册\\node_modules\\puppetee
 const { readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync, mkdirSync, existsSync } = require("fs");
 const { join } = require("path");
 
+// ========== Cloudflare Turnstile 绕过补丁 ==========
+const TURNSTILE_PATCH_FN = () => {
+  if (window.__TURNSTILE_PATCHED__) return;
+  window.__TURNSTILE_PATCHED__ = true;
+  var _offX = Math.floor(Math.random() * 121) + 80;
+  var _offY = Math.floor(Math.random() * 91) + 60;
+  try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true }); } catch(e) {}
+};
+
 // ========== 配置 ==========
 const CDP_PORT = 64610;
 const EMAIL_DIR = process.argv[2] || "C:\\Users\\XZXyuan\\Downloads\\批量注册邮箱\\已经使用";
@@ -82,12 +95,52 @@ async function pollMagicLink(clientId, refreshToken, afterTime, maxWaitMs = 1800
 // ========== 浏览器操作 ==========
 async function waitForTurnstile(page, maxWait = 60000) {
   const start = Date.now();
+  let lastReset = 0;
   while (Date.now() - start < maxWait) {
     const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 300));
     // Turnstile 完成后页面会变成 "Choose your handle" 或其他状态
     if (!/verifying your browser|complete the browser check/i.test(bodyText)) {
       return true;
     }
+
+    // ★ 主动通过 turnstile API 获取令牌
+    const tsResult = await page.evaluate(() => {
+      // 方法1: turnstile.getResponse()
+      try {
+        if (typeof turnstile !== 'undefined') {
+          const res = turnstile.getResponse();
+          if (res) {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) {
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(input, res);
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return { ok: true, tokenLen: res.length };
+          }
+        }
+      } catch (e) {}
+      // 方法2: 检查隐藏字段
+      try {
+        const input = document.querySelector('input[name="cf-turnstile-response"]');
+        if (input && input.value) return { ok: true, tokenLen: input.value.length };
+      } catch (e) {}
+      return { ok: false };
+    }).catch(() => ({ ok: false }));
+
+    if (tsResult.ok) {
+      log("  [Turnstile] Token obtained! len=" + tsResult.tokenLen);
+      return true;
+    }
+
+    // ★ 定期 reset Turnstile
+    if (Date.now() - lastReset > 15000) {
+      await page.evaluate(() => {
+        try { if (typeof turnstile !== 'undefined') turnstile.reset(); } catch(e) {}
+      }).catch(() => {});
+      lastReset = Date.now();
+    }
+
     await sleep(3000);
   }
   return false;
@@ -122,6 +175,15 @@ async function registerOne(browser, email, password, clientId, refreshToken) {
   const page = (await browser.pages())[0];
   page.setDefaultTimeout(60000);
   await page.setViewport({ width: 1440, height: 900 });
+
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(TURNSTILE_PATCH_FN);
+
+  // ★ 新标签页也注入补丁
+  browser.on('targetcreated', async (target) => {
+    const p = await target.page().catch(() => null);
+    if (p) await p.evaluateOnNewDocument(TURNSTILE_PATCH_FN);
+  });
 
   function getBodyText(len) {
     return page.evaluate((l) => document.body.innerText.substring(0, l), len || 500).catch(() => "");
@@ -228,6 +290,38 @@ async function registerOne(browser, email, password, clientId, refreshToken) {
 
     if (/invalid|expired/i.test(bodyText) && !/redirecting|verif/i.test(bodyText)) {
       throw new Error("魔法链接已过期");
+    }
+
+    // ★ 主动获取 Turnstile 令牌
+    if (/verifying|browser check|turnstile/i.test(bodyText) || i >= 2) {
+      const tsResult = await page.evaluate(() => {
+        try {
+          if (typeof turnstile !== 'undefined') {
+            const res = turnstile.getResponse();
+            if (res) {
+              const input = document.querySelector('input[name="cf-turnstile-response"]');
+              if (input) {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(input, res);
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              return { ok: true, tokenLen: res.length };
+            }
+            // 没有 token，尝试 reset
+            try { turnstile.reset(); } catch(e) {}
+          }
+        } catch (e) {}
+        // 检查隐藏字段
+        try {
+          const input = document.querySelector('input[name="cf-turnstile-response"]');
+          if (input && input.value) return { ok: true, tokenLen: input.value.length };
+        } catch (e) {}
+        return { ok: false };
+      }).catch(() => ({ ok: false }));
+
+      if (tsResult.ok) {
+        log("  [Turnstile] Token obtained! len=" + tsResult.tokenLen);
+      }
     }
 
     // 每次迭代都尝试点击 "Continue in browser"

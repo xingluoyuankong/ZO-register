@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZO 批量注册 - Plugin</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, sans-serif; min-height: 100vh; }
+    .header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; border-bottom: 1px solid #1a1a1a; }
+    .header h1 { font-size: 20px; font-weight: 700; }
+    .header h1 span { color: #6366f1; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 16px 24px; }
+    .stats { display: flex; gap: 12px; margin-bottom: 16px; }
+    .stat-card { background: #111; border: 1px solid #1a1a1a; border-radius: 12px; padding: 12px 20px; min-width: 100px; text-align: center; }
+    .stat-card .label { font-size: 11px; color: #666; text-transform: uppercase; }
+    .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+    .total .value { color: #e0e0e0; } .pending .value { color: #eab308; }
+    .working .value { color: #6366f1; } .success .value { color: #22c55e; }
+    .fail .value { color: #ef4444; }
+    .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+    .controls label { font-size: 13px; color: #888; }
+    .controls select { background: #1a1a1a; color: #e0e0e0; border: 1px solid #333; padding: 6px 12px; border-radius: 8px; font-size: 13px; }
+    .btn { padding: 8px 20px; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 600; transition: all 0.15s; }
+    .btn-start { background: #6366f1; color: white; } .btn-start:hover { background: #5558e6; }
+    .btn-stop { background: #ef4444; color: white; } .btn-stop:hover { background: #dc2626; }
+    .btn-browse { background: #1a1a1a; color: #aaa; border: 1px solid #333; } .btn-browse:hover { background: #444; }
+    .btn-register-one { background: #6366f1; color: white; padding: 4px 12px; border: none; border-radius: 6px; font-size: 11px; cursor: pointer; }
+    .btn-register-one:hover { background: #5558e6; }
+    .btn-register-one:disabled { background: #444; cursor: not-allowed; }
+    .btn-apply { background: #22c55e; color: white; } .btn-apply:hover { background: #16a34a; }
+    .table-wrap { background: #111; border: 1px solid #1a1a1a; border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+    .table-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #1a1a1a; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 10px 16px; font-size: 11px; color: #555; text-transform: uppercase; border-bottom: 1px solid #1a1a1a; }
+    td { padding: 10px 16px; border-bottom: 1px solid #0d0d0d; font-size: 13px; }
+    tr:hover td { background: #0d0d0d; }
+    .badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .badge-pending { background: #1c1917; color: #a8a29e; }
+    .badge-registering { background: #1e1b4b; color: #818cf8; }
+    .badge-success { background: #052e16; color: #4ade80; }
+    .badge-fail { background: #1c0a0a; color: #f87171; }
+    .error { color: #ef4444; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .empty { text-align: center; padding: 60px 20px; color: #333; }
+    .empty .icon { font-size: 48px; margin-bottom: 16px; }
+    .log-panel { background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 12px; max-height: 300px; overflow-y: auto; }
+    .log-panel-header { display: flex; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid #1a1a1a; font-size: 12px; color: #555; }
+    .log-panel-header .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    #logBody { padding: 12px 16px; font-family: monospace; font-size: 12px; line-height: 1.8; color: #666; }
+    .log-entry { border-bottom: 1px solid #111; padding: 2px 0; }
+    .log-entry .email { color: #6366f1; } .log-entry .msg { color: #999; }
+    .workers { display: flex; gap: 6px; }
+    .worker { background: #1e1b4b; color: #818cf8; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; animation: pulse 1.5s infinite; }
+  </style>
+</head>
+<body>
+  <div class="header"><h1><span>ZO</span> 批量注册</h1><div style="font-size:12px;color:#555" id="connStatus">● 连接中...</div></div>
+  <div class="container">
+    <div class="stats">
+      <div class="stat-card total"><div class="label">总计</div><div class="value" id="sTotal">0</div></div>
+      <div class="stat-card pending"><div class="label">待处理</div><div class="value" id="sPending">0</div></div>
+      <div class="stat-card working"><div class="label">注册中</div><div class="value" id="sWorking">0</div></div>
+      <div class="stat-card success"><div class="label">成功</div><div class="value" id="sSuccess">0</div></div>
+      <div class="stat-card fail"><div class="label">失败</div><div class="value" id="sFail">0</div></div>
+    </div>
+    <div class="controls" style="margin-bottom:12px">
+      <label>📁 邮箱文件夹</label>
+      <input type="text" id="emailDirInput" placeholder="路径..." style="flex:1;min-width:300px;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;padding:6px 12px;border-radius:8px;font-size:13px">
+      <button class="btn btn-apply" onclick="applyEmailDir()">✓ 应用</button>
+      <button class="btn btn-browse" onclick="browseEmailDir()">📂 浏览</button>
+      <span id="dirStatus" style="font-size:12px;color:#888"></span>
+    </div>
+    <div class="controls">
+      <label>浏览器</label>
+      <select id="browserType" onchange="changeBrowserType()"><option value="edge">Edge (无痕)</option><option value="chrome">Chrome (无痕)</option></select>
+      <label>并发数</label>
+      <select id="concurrency"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select>
+      <button class="btn btn-start" id="btnStart" onclick="startBatch()">▶ 开始注册</button>
+      <button class="btn btn-stop" id="btnStop" onclick="stopBatch()" disabled>■ 停止</button>
+      <button class="btn" style="background:#222;color:#aaa" onclick="loadEmails()">↻ 刷新</button>
+      <div style="flex:1"></div><div id="workerBar" class="workers"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-header"><span style="font-size:13px;font-weight:600">📧 邮箱列表</span><span id="emailCount" style="font-size:12px;color:#555"></span></div>
+      <table><thead><tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th><th>操作</th></tr></thead>
+      <tbody id="emailBody"><tr><td colspan="7" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr></tbody></table>
+    </div>
+    <div class="log-panel">
+      <div class="log-panel-header"><span>📋 实时日志</span><span class="dot"></span></div>
+      <div id="logBody"></div>
+    </div>
+  </div>
+<script>
+let ws, emails = [], maxLogs = 200;
+function badge(s) {
+  const m = { pending:'⏳ 待处理', registering:'⚡ 注册中', success:'✅ 成功', fail:'❌ 失败' };
+  return '<span class="badge badge-' + s + '">' + (m[s] || s) + '</span>';
+}
+function addLog(email, msg) {
+  const body = document.getElementById('logBody');
+  const t = new Date().toLocaleTimeString();
+  body.innerHTML = '<div class="log-entry"><span style="color:#555">' + t + '</span> <span class="email">' + email + '</span> <span class="msg">' + msg + '</span></div>' + body.innerHTML;
+  while (body.children.length > maxLogs) body.removeChild(body.lastChild);
+}
+function updateStats(s) {
+  if (s) { document.getElementById('sTotal').textContent = s.total; document.getElementById('sPending').textContent = s.pending; document.getElementById('sWorking').textContent = s.inProgress; document.getElementById('sSuccess').textContent = s.success; document.getElementById('sFail').textContent = s.fail; }
+}
+function updateWorkers(w) { document.getElementById('workerBar').innerHTML = w.map(x => '<div class="worker">⚡ ' + (x.email ? x.email.split('@')[0].substring(0,12) : x.id) + '</div>').join(''); }
+function updateEmailRow(d) {
+  const tr = document.querySelector('tr[data-email="' + d.email + '"]');
+  if (!tr) return;
+  tr.querySelector('.status').innerHTML = badge(d.status);
+  if (d.handle) tr.querySelector('.handle').textContent = d.handle;
+  if (d.progress) tr.querySelector('.progress').textContent = d.progress;
+  if (d.error) tr.querySelector('.err').textContent = d.error;
+  const btn = tr.querySelector('.btn-register-one');
+  if (btn) { btn.disabled = d.status === 'registering' || d.status === 'success'; btn.textContent = d.status === 'success' ? '✓' : d.status === 'fail' ? '重试' : '注册'; }
+}
+function renderTable() {
+  const body = document.getElementById('emailBody');
+  if (!emails.length) { body.innerHTML = '<tr><td colspan="7" class="empty"><div class="icon">📭</div>无邮箱文件</td></tr>'; document.getElementById('emailCount').textContent = ''; return; }
+  document.getElementById('emailCount').textContent = emails.length + ' 个';
+  body.innerHTML = emails.map((e, i) =>
+    '<tr data-email="' + e.email + '"><td style="color:#555">' + (i+1) + '</td><td style="font-family:monospace;font-size:12px">' + e.email + '</td><td class="status">' + badge(e.status) + '</td><td class="handle" style="color:#6366f1">' + (e.handle||'-') + '</td><td class="progress" style="color:#888">' + (e.progress||'-') + '</td><td class="err error" title="' + (e.error||'') + '">' + (e.error||'-') + '</td><td><button class="btn-register-one" onclick="registerOne(\'' + e.email + '\')" ' + (e.status==='registering'||e.status==='success' ? 'disabled' : '') + '>注册</button></td></tr>'
+  ).join('');
+}
+async function loadEmails() { const r = await fetch('/api/emails'); const d = await r.json(); emails = d.emails; updateStats(d.stats); renderTable(); loadEmailDir(); }
+async function startBatch() { await fetch('/api/start', { method: 'POST' }); document.getElementById('btnStart').disabled = true; document.getElementById('btnStop').disabled = false; }
+async function stopBatch() { await fetch('/api/stop', { method: 'POST' }); document.getElementById('btnStart').disabled = false; document.getElementById('btnStop').disabled = true; }
+async function registerOne(email) { if (!confirm('确认注册 ' + email + '？')) return; const btn = document.querySelector('tr[data-email="' + email + '"] .btn-register-one'); if (btn) { btn.disabled = true; btn.textContent = '注册中...'; } await fetch('/api/register-one', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) }); }
+async function loadEmailDir() { try { const r = await fetch('/api/email-dir'); const d = await r.json(); document.getElementById('emailDirInput').value = d.dir; } catch (e) {} }
+async function applyEmailDir() { const dir = document.getElementById('emailDirInput').value.trim(); if (!dir) return; const r = await fetch('/api/email-dir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) }); const d = await r.json(); if (d.ok) { loadEmails(); } else { alert(d.error); } }
+async function changeBrowserType() { const bt = document.getElementById('browserType').value; await fetch('/api/browser-type', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browserType: bt }) }); addLog('', '🌐 浏览器: ' + bt); }
+function connect() {
+  ws = new WebSocket('ws://' + location.host);
+  ws.onopen = () => { document.getElementById('connStatus').innerHTML = '<span style="color:#22c55e">● 已连接</span>'; };
+  ws.onclose = () => { document.getElementById('connStatus').innerHTML = '<span style="color:#ef4444">● 断开</span>'; setTimeout(connect, 3000); };
+  ws.onmessage = (e) => {
+    const { type, data } = JSON.parse(e.data);
+    if (type === 'init') { updateStats(data.stats); if (data.concurrency) document.getElementById('concurrency').value = data.concurrency; if (data.emailDir) document.getElementById('emailDirInput').value = data.emailDir; if (data.browserType) document.getElementById('browserType').value = data.browserType; }
+    else if (type === 'stats') updateStats(data);
+    else if (type === 'email_update') updateEmailRow(data);
+    else if (type === 'emails_loaded') { emails = data.emails; updateStats(data.stats); renderTable(); }
+    else if (type === 'log') addLog(data.email, data.msg);
+    else if (type === 'worker_update') updateWorkers(data);
+    else if (type === 'batch_start') { document.getElementById('btnStart').disabled = true; document.getElementById('btnStop').disabled = false; }
+    else if (type === 'batch_done' || type === 'batch_stop') { document.getElementById('btnStart').disabled = false; document.getElementById('btnStop').disabled = true; }
+  };
+}
+document.getElementById('emailDirInput').addEventListener('keydown', e => { if (e.key === 'Enter') applyEmailDir(); });
+loadEmails(); connect();
+</script>
+</body>
+</html>

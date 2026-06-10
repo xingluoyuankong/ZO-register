@@ -6,18 +6,39 @@ const express = require("express");
 const http = require("http");
 const { WebSocketServer } = require("ws");
 const puppeteer = require("E:\\API获取工具\\ZO注册\\node_modules\\puppeteer-core");
-const { readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync, mkdirSync, existsSync } = require("fs");
+const { readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync, mkdirSync, existsSync, mkdtempSync, rmSync } = require("fs");
 const { join } = require("path");
+const os = require("os");
+const { TURNSTILE_PATCH, TURNSTILE_GET_TOKEN, TURNSTILE_FILL_TOKEN } = require("./turnstile-patch");
 
 // ========== Config ==========
 const WEB_PORT = 3456;
-const EMAIL_DIR = "C:\\Users\\XZXyuan\\Downloads\\批量注册邮箱\\已经使用";
+const CONFIG_FILE = join(__dirname, "config.json");
+const DEFAULT_EMAIL_DIR = "C:\\Users\\XZXyuan\\Downloads\\批量注册邮箱\\已经使用";
+
+// Load or init config
+let config = { emailDir: DEFAULT_EMAIL_DIR, browserType: "edge", nstApiKey: "75aea070-3456-4603-9a57-e9b8791de3c9", nstApiBase: "http://localhost:8848/api/v2" };
+try {
+  if (existsSync(CONFIG_FILE)) {
+    const saved = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+    if (saved.emailDir) config.emailDir = saved.emailDir;
+    if (saved.browserType) config.browserType = saved.browserType;
+    if (saved.nstApiKey) config.nstApiKey = saved.nstApiKey;
+    if (saved.nstApiBase) config.nstApiBase = saved.nstApiBase;
+  }
+} catch (e) {}
+let EMAIL_DIR = config.emailDir;
+
+function saveConfig() {
+  try { writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8"); } catch (e) {}
+}
 const REGISTERED_DIR = "E:\\API获取工具\\ZO注册\\registered";
 const RESULTS_FILE = join(REGISTERED_DIR, "results.jsonl");
 const SIGNUP_URL = "https://www.zo.computer/signup";
 const GRAPH_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const GRAPH_MAIL_URL = "https://graph.microsoft.com/v1.0/me/messages";
 const CHROME_PATH = "C:\\Users\\XZXyuan\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe";
+const EDGE_PATH = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const DEFAULT_CONCURRENCY = 1;
 
 if (!existsSync(REGISTERED_DIR)) mkdirSync(REGISTERED_DIR, { recursive: true });
@@ -26,7 +47,7 @@ if (!existsSync(REGISTERED_DIR)) mkdirSync(REGISTERED_DIR, { recursive: true });
 const state = {
   emails: [], running: false, concurrency: DEFAULT_CONCURRENCY,
   stats: { total: 0, pending: 0, success: 0, fail: 0, inProgress: 0 },
-  workers: [], browser: null,
+  workers: [],
 };
 const wsClients = new Set();
 
@@ -141,32 +162,239 @@ async function pollMagicLink(email, clientId, refreshToken, afterTime, log) {
       if (link) return { link, newRefreshToken: rt };
     } catch (e) { log("Poll error: " + e.message); }
     process.stdout.write(".");
-    await sleep(5000);
+    await sleep(3000);
   }
   return null;
 }
 
+// ========== Nstbrowser API ==========
+async function nstApi(path, method, body) {
+  const opts = {
+    method: method || "GET",
+    headers: { "x-api-key": config.nstApiKey, "Content-Type": "application/json" }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(config.nstApiBase + path, opts);
+  return r.json();
+}
+
+async function nstCreateProfile(name, proxy) {
+  const body = { name: name || "zo-" + Date.now(), platform: "Windows" };
+  if (proxy) body.proxy = proxy;
+  const r = await nstApi("/profiles", "POST", body);
+  if (r.err) throw new Error("Nstbrowser create profile failed: " + r.msg);
+  return r.data;
+}
+
+async function nstStartProfile(profileId) {
+  const r = await nstApi("/browsers/" + profileId, "POST");
+  if (r.err) throw new Error("Nstbrowser start failed: " + r.msg);
+  return r.data; // { port, profileId, proxy, webSocketDebuggerUrl }
+}
+
+async function nstStopProfile(profileId) {
+  try { await nstApi("/browsers/" + profileId, "DELETE"); } catch (e) {}
+}
+
+async function nstDeleteProfile(profileId) {
+  try { await nstApi("/profiles/" + profileId, "DELETE"); } catch (e) {}
+}
+
+async function nstListProfiles() {
+  const r = await nstApi("/profiles?limit=100");
+  if (r.err) throw new Error("Nstbrowser list failed: " + r.msg);
+  return r.data;
+}
+
 // ========== Register one email ==========
-async function registerOne(browser, emailItem) {
+async function registerOne(emailItem) {
   const { email, password, clientId, refreshToken } = emailItem;
   const log = (msg) => { broadcast("log", { email, msg }); console.log("[" + email.substring(0, 20) + "] " + msg); };
 
-  const context = await browser.createBrowserContext();
-  const page = await context.newPage();
-  page.setDefaultTimeout(60000);
-  await page.setViewport({ width: 1440, height: 900 });
-  
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    window.chrome = { runtime: {} };
-    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-  });
+  let browser, nstProfileId, tempDir;
+  const bt = config.browserType || "chrome";
 
   try {
+    if (bt === "nstbrowser") {
+      // Nstbrowser: 创建 profile → 启动 → 获取 CDP 连接
+      log("[BROWSER] Creating Nstbrowser profile...");
+      const profile = await nstCreateProfile("zo-" + email.split("@")[0]);
+      nstProfileId = profile._id || profile.profileId;
+      log("[BROWSER] Profile created: " + nstProfileId);
+
+      log("[BROWSER] Starting profile...");
+      const started = await nstStartProfile(nstProfileId);
+      log("[BROWSER] CDP: " + (started.webSocketDebuggerUrl || "none"));
+      if (!started.webSocketDebuggerUrl) throw new Error("Nstbrowser no webSocketDebuggerUrl");
+
+      browser = await puppeteer.connect({
+        browserWSEndpoint: started.webSocketDebuggerUrl,
+        defaultViewport: null,
+      });
+      log("[BROWSER] Connected to Nstbrowser");
+    } else {
+      // Chrome/Edge: 独立临时 user-data-dir + 无痕模式
+      tempDir = mkdtempSync(join(os.tmpdir(), "zo_reg_"));
+      const exePath = bt === "edge" ? EDGE_PATH : CHROME_PATH;
+      const browserName = bt === "edge" ? "Edge" : "Chrome";
+
+      browser = await puppeteer.launch({
+        executablePath: exePath,
+        headless: false,
+        protocolTimeout: 300000,
+        userDataDir: tempDir,
+        args: [
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-default-apps",
+          "--disable-features=Translate",
+          "--disable-blink-features=AutomationControlled",
+          "--window-size=1440,900",
+          "--incognito",
+          "--disk-cache-size=0",
+          "--disable-save-password-bubble",
+          "--disable-password-generation",
+          "--password-store=basic",
+          "--disable-sync",
+          "--disable-client-side-phishing-detection",
+          "--disable-background-networking",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+          "--disable-hang-monitor",
+          "--disable-gpu",
+          "--disable-software-rasterizer",
+          "--disable-dev-shm-usage",
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-component-update",
+          "--metrics-recording-only",
+          "--no-pings",
+          "--disable-extensions",
+          "--disable-plugins-discovery",
+          "--disable-infobars",
+        ],
+        defaultViewport: { width: 1440, height: 900 },
+        ignoreDefaultArgs: ["--enable-automation"],
+      });
+      log("[BROWSER] " + browserName + " fresh profile: " + tempDir);
+    }
+
+    const pages = await browser.pages();
+    const page = pages.length > 0 ? pages[0] : await browser.newPage();
+    page.setDefaultTimeout(60000);
+    await page.setViewport({ width: 1440, height: 900 });
+
+    // 高级 Stealth patches — 消除自动化痕迹 + Turnstile 绕过
+    await page.evaluateOnNewDocument(() => {
+      // ★ Cloudflare Turnstile 绕过：劫持 screenX/screenY
+      if (!window.__TURNSTILE_PATCHED__) {
+        window.__TURNSTILE_PATCHED__ = true;
+        var _offX = Math.floor(Math.random() * 121) + 80;
+        var _offY = Math.floor(Math.random() * 91) + 60;
+        try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+      }
+      // 移除 webdriver 标记
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      // 伪造插件列表
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+          const plugins = [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+          ];
+          plugins.length = 3;
+          return plugins;
+        }
+      });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
+      // 伪造 chrome 对象
+      window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+      // 移除 CDC 标记
+      delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+      delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+      delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+      // 伪造 permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+          Promise.resolve({ state: Notification.permission }) :
+          originalQuery(parameters)
+      );
+      // 伪造 connection
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({ rtt: 50, downlink: 10, effectiveType: '4g', saveData: false })
+      });
+      // 伪造 hardwareConcurrency
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      // 伪造 deviceMemory
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+    });
+
+    browser.on('targetcreated', async (target) => {
+      const p = await target.page().catch(() => null);
+      if (!p) return;
+      await p.evaluateOnNewDocument(() => {
+        // ★ Turnstile 绕过：劫持 screenX/screenY
+        if (!window.__TURNSTILE_PATCHED__) {
+          window.__TURNSTILE_PATCHED__ = true;
+          var _offX = Math.floor(Math.random() * 121) + 80;
+          var _offY = Math.floor(Math.random() * 91) + 60;
+          try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+          try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+          try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+          try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+        }
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => {
+            const plugins = [
+              { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+              { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+              { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            plugins.length = 3;
+            return plugins;
+          }
+        });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+      });
+    });
+
+    const result = await registerOneWithBrowser(browser, page, emailItem, log);
+    return result;
+  } catch (e) {
+    log("FAILED: " + e.message);
+    throw e;
+  } finally {
+    // 清理
+    if (bt === "nstbrowser" && nstProfileId) {
+      try { await nstStopProfile(nstProfileId); } catch (e) {}
+      try { await nstDeleteProfile(nstProfileId); } catch (e) {}
+      log("[BROWSER] Nstbrowser profile cleaned up");
+    } else if (browser) {
+      try { await browser.close(); } catch (e) {}
+      if (tempDir) try { rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+      log("[BROWSER] Cleaned up");
+    }
+  }
+}
+
+async function registerOneWithBrowser(browser, page, emailItem, log) {
+  const { email, password, clientId, refreshToken } = emailItem;
+  try {
+    // Notify frontend: registering
+    setEmailStatus(email, "registering");
+
     // Step 1: Open signup
     log("[1/7] Opening signup...");
     await page.goto(SIGNUP_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -252,7 +480,7 @@ async function registerOne(browser, emailItem) {
       }
     }
 
-    const sendTime = new Date(Date.now() - 10000); // 10s buffer for clock skew
+    const sendTime = new Date(Date.now() - 3000); // 3s buffer
     log("[4/7] Email sent! Polling inbox...");
 
     // Step 4: Poll for magic link
@@ -265,30 +493,42 @@ async function registerOne(browser, emailItem) {
       writeFileSync(join(EMAIL_DIR, email + ".txt"), [email, password, clientId, newRefreshToken].join("----"), "utf-8");
     }
 
-    // Step 5: Open magic link - use generous timeout, catch timeout and continue
+    // Step 5: Open magic link
+    // 清除当前页面状态，用新上下文打开链接
     log("[5/7] Opening magic link...");
+    log("  Link: " + link.substring(0, 80));
+
+    // 清除 cookies 和缓存，确保干净的请求
+    const client = await page.target().createCDPSession();
+    try { await client.send("Network.clearBrowserCookies"); } catch (e) {}
+    try { await client.send("Network.clearBrowserCache"); } catch (e) {}
+    try { await client.detach(); } catch (e) {}
+
+    // 导航到链接
     try {
-      await page.goto(link, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.goto(link, { waitUntil: "networkidle2", timeout: 60000 });
     } catch (navErr) {
       if (/timeout/i.test(navErr.message)) {
-        log("  Navigation timeout (expected with Turnstile), continuing...");
+        log("  Navigation timeout, continuing...");
       } else if (/net::ERR_/i.test(navErr.message)) {
         throw new Error("Network error opening link: " + navErr.message);
       } else {
         log("  Nav error: " + navErr.message + ", continuing...");
       }
     }
-    await sleep(3000);
+    await sleep(2000);
 
     // Step 5b: Wait for Turnstile → "Continue in browser" → handle page
     log("  Waiting for Turnstile/redirect...");
     let reachedHandlePage = false;
     let clickedContinueOnce = false;
+    let seenRedirecting = false;
+    const startUrl = page.url();
     for (let i = 0; i < 60; i++) {
       const txt = await getBodyText(page, 600);
       const currentUrl = page.url();
 
-      if (/choose your handle/i.test(txt) || currentUrl.includes("/signup") && /handle/i.test(txt)) {
+      if (/choose your handle/i.test(txt) || (currentUrl.includes("/signup") && /handle/i.test(txt))) {
         log("  Reached handle page!");
         reachedHandlePage = true;
         break;
@@ -298,27 +538,117 @@ async function registerOne(browser, emailItem) {
         throw new Error("Link expired after click");
       }
 
+      // After clicking, wait for URL to actually change (redirect)
+      if (clickedContinueOnce && seenRedirecting) {
+        // If URL changed from verify page → redirect happened
+        if (currentUrl !== startUrl && !currentUrl.includes("email-login/verify")) {
+          log("  URL changed to: " + currentUrl);
+          await sleep(3000);
+          const afterRedirect = await getBodyText(page, 400);
+          if (/choose your handle/i.test(afterRedirect)) {
+            log("  Reached handle page after redirect!");
+            reachedHandlePage = true;
+            break;
+          }
+          log("  After redirect: " + afterRedirect.substring(0, 60).replace(/\n/g, " "));
+          seenRedirecting = false; // Reset, new page state
+          continue;
+        }
+        // Still on same page with Redirecting... just wait
+        if (/redirecting/i.test(txt)) {
+          if (i % 5 === 0) log("  [" + i * 3 + "s] Waiting for redirect...");
+          await sleep(3000);
+          continue;
+        }
+      }
+
       // Check Turnstile status before clicking
-      const turnstileStatus = await page.evaluate(() => {
+      // ★ 主动通过 turnstile API 获取令牌
+      const turnstileResult = await page.evaluate(() => {
+        // 方法1: turnstile.getResponse() API
+        try {
+          if (typeof turnstile !== 'undefined') {
+            const res = turnstile.getResponse();
+            if (res) {
+              // 填入隐藏字段
+              const input = document.querySelector('input[name="cf-turnstile-response"]');
+              if (input) {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(input, res);
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              return { status: 'ready', tokenLen: res.length };
+            }
+          }
+        } catch (e) {}
+
+        // 方法2: 检查隐藏字段是否已有值
+        try {
+          const input = document.querySelector('input[name="cf-turnstile-response"]');
+          if (input && input.value) return { status: 'ready', tokenLen: input.value.length };
+        } catch (e) {}
+
+        // 方法3: 检查 iframe
         const iframes = document.querySelectorAll('iframe[src*="turnstile"], iframe[src*="challenges"]');
-        if (iframes.length === 0) return 'no_iframe';
-        // Check if Turnstile checkbox is checked
+        if (iframes.length === 0) return { status: 'no_iframe' };
         for (const iframe of iframes) {
           try {
             const doc = iframe.contentDocument;
             if (doc) {
               const checked = doc.querySelector('[data-checked]');
-              if (checked) return 'checked';
+              if (checked) return { status: 'checked' };
             }
           } catch(e) {}
         }
-        return 'pending';
-      }).catch(() => 'unknown');
+        return { status: 'pending' };
+      }).catch(() => ({ status: 'unknown' }));
+
+      const turnstileStatus = turnstileResult.status;
+      if (turnstileResult.tokenLen) {
+        log("  [Turnstile] Token obtained! len=" + turnstileResult.tokenLen);
+      }
 
       if (i % 5 === 0) log("  [" + i * 3 + "s] Turnstile: " + turnstileStatus + " | " + txt.substring(0, 50).replace(/\n/g, " "));
 
-      // Only click "Continue in browser" if Turnstile seems done or no iframe found, and haven't clicked yet
-      if (!clickedContinueOnce || turnstileStatus === 'checked' || turnstileStatus === 'no_iframe') {
+      // ★ 主动 reset Turnstile 并等待令牌（当状态为 pending 时）
+      if (turnstileStatus === 'pending' && i > 0 && i % 3 === 0) {
+        const resetResult = await page.evaluate(() => {
+          try {
+            if (typeof turnstile !== 'undefined') {
+              turnstile.reset();
+              // 等待一小段时间让 PoW 完成
+              return new Promise((resolve) => {
+                let attempts = 0;
+                const check = () => {
+                  attempts++;
+                  try {
+                    const res = turnstile.getResponse();
+                    if (res) {
+                      const input = document.querySelector('input[name="cf-turnstile-response"]');
+                      if (input) {
+                        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                        setter.call(input, res);
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                      }
+                      resolve('got_token');
+                      return;
+                    }
+                  } catch (e) {}
+                  if (attempts < 10) { setTimeout(check, 1000); } else { resolve('timeout'); }
+                };
+                setTimeout(check, 2000);
+              });
+            }
+          } catch (e) {}
+          return 'no_turnstile';
+        }).catch(() => 'error');
+        if (resetResult === 'got_token') {
+          log("  [Turnstile] Token obtained via turnstile.reset()+getResponse()!");
+        }
+      }
+
+      // Click "Continue in browser" if not already clicked or if turnstile is ready
+      if (!clickedContinueOnce) {
         const clickedContinue = await page.evaluate(() => {
           for (const el of document.querySelectorAll("button, a, div[role=button], span")) {
             const text = el.textContent.trim();
@@ -333,9 +663,6 @@ async function registerOne(browser, emailItem) {
         if (clickedContinue) {
           log("  Clicked 'Continue in browser' (turnstile=" + turnstileStatus + ")");
           clickedContinueOnce = true;
-          try {
-            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
-          } catch (e) {}
           await sleep(5000);
           const afterTxt = await getBodyText(page, 300);
           if (/choose your handle/i.test(afterTxt)) {
@@ -343,17 +670,18 @@ async function registerOne(browser, emailItem) {
             reachedHandlePage = true;
             break;
           }
-          // If still on same page, wait before retrying
-          if (!/check your email/i.test(afterTxt)) {
-            log("  After click: " + afterTxt.substring(0, 60).replace(/\n/g, " "));
+          if (/redirecting/i.test(afterTxt)) {
+            seenRedirecting = true;
+            log("  Page redirecting, waiting...");
           }
           continue;
         }
       }
 
       if (/redirecting/i.test(txt)) {
+        seenRedirecting = true;
         log("  Redirecting...");
-        await sleep(5000);
+        await sleep(3000);
         continue;
       }
 
@@ -424,10 +752,8 @@ async function registerOne(browser, emailItem) {
   } catch (e) {
     log("FAILED: " + e.message);
     throw e;
-  } finally {
-    await page.close().catch(() => {});
-    await context.close().catch(() => {});
   }
+  // 不在这里关闭浏览器，由 registerOne() 统一清理
 }
 
 // ========== Batch runner ==========
@@ -438,58 +764,6 @@ async function runBatch() {
 
   const pending = state.emails.filter(e => e.status === "pending");
   if (pending.length === 0) { state.running = false; broadcast("batch_done", state.stats); return; }
-
-  // Launch browser with puppeteer.launch() — pipe-mode CDP, undetectable
-  let browser;
-  try {
-    console.log("[INFO] Launching Chrome...");
-    browser = await puppeteer.launch({
-      executablePath: CHROME_PATH,
-      headless: false,
-      protocolTimeout: 300000,
-      args: [
-        "--no-first-run",
-        "--disable-features=Translate",
-        "--disable-blink-features=AutomationControlled",
-        "--window-size=1440,900",
-      ],
-      defaultViewport: { width: 1440, height: 900 },
-    });
-    console.log("[INFO] Chrome launched (pipe CDP)");
-    state.browser = browser;
-    
-    // Apply stealth patches to all new pages
-    browser.on('targetcreated', async (target) => {
-      const page = await target.page().catch(() => null);
-      if (!page) return;
-      await page.evaluateOnNewDocument(() => {
-        // Hide webdriver
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        // Fix plugins
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        // Fix languages
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        // Fix permissions
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-          parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
-        // Hide automation indicators
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-        // Chrome runtime
-        window.chrome = { runtime: {} };
-      });
-    });
-  } catch (e) {
-    console.error("[ERROR] Cannot launch Chrome:", e.message);
-    broadcast("error", { msg: "Cannot launch Chrome: " + e.message });
-    state.running = false;
-    return;
-  }
 
   const queue = [...pending];
 
@@ -504,7 +778,7 @@ async function runBatch() {
     broadcast("worker_update", state.workers);
 
     try {
-      const result = await registerOne(browser, emailItem);
+      const result = await registerOne(emailItem);
       setEmailStatus(emailItem.email, "success", result);
       appendFileSync(RESULTS_FILE, JSON.stringify({ ...emailItem, ...result, time: new Date().toISOString() }) + "\n");
     } catch (e) {
@@ -522,9 +796,7 @@ async function runBatch() {
   await Promise.all(workers);
 
   state.running = false;
-  state.browser = null;
   broadcast("batch_done", state.stats);
-  try { await browser.close(); } catch (e) {}
 }
 
 // ========== Express + WebSocket ==========
@@ -547,6 +819,29 @@ app.get("/api/emails", (req, res) => {
 
 app.post("/api/start", (req, res) => { if (state.running) return res.json({ ok: false, error: "already running" }); runBatch(); res.json({ ok: true }); });
 app.post("/api/stop", (req, res) => { state.running = false; broadcast("batch_stop", {}); res.json({ ok: true }); });
+
+// ========== Single Register ==========
+app.post("/api/register-one", (req, res) => {
+  const targetEmail = req.body && req.body.email;
+  if (!targetEmail) return res.json({ ok: false, error: "未指定邮箱" });
+  const item = state.emails.find(e => e.email === targetEmail);
+  if (!item) return res.json({ ok: false, error: "找不到邮箱: " + targetEmail });
+  if (item.status === "registering" || item.status === "success") return res.json({ ok: false, error: "该邮箱已在注册或已成功" });
+  item.status = "pending";
+  updateStats();
+  // 异步启动单个注册
+  (async () => {
+    try {
+      const result = await registerOne(item);
+      setEmailStatus(item.email, "success", result);
+      appendFileSync(RESULTS_FILE, JSON.stringify({ ...item, ...result, time: new Date().toISOString() }) + "\n");
+    } catch (e) {
+      setEmailStatus(item.email, "fail", { error: e.message });
+      appendFileSync(RESULTS_FILE, JSON.stringify({ email: item.email, status: "fail", error: e.message, time: new Date().toISOString() }) + "\n");
+    }
+  })();
+  res.json({ ok: true });
+});
 app.get("/api/status", (req, res) => { res.json({ running: state.running, stats: state.stats, workers: state.workers, concurrency: state.concurrency }); });
 app.get("/api/registered", (req, res) => {
   const files = existsSync(REGISTERED_DIR) ? readdirSync(REGISTERED_DIR).filter(f => f.endsWith(".txt")) : [];
@@ -556,13 +851,65 @@ app.get("/api/registered", (req, res) => {
 });
 app.post("/api/concurrency", (req, res) => { state.concurrency = Math.max(1, Math.min(10, (req.body && req.body.concurrency) || 3)); res.json({ ok: true, concurrency: state.concurrency }); });
 
+// ========== Email Dir API ==========
+app.get("/api/email-dir", (req, res) => {
+  res.json({ dir: EMAIL_DIR, exists: existsSync(EMAIL_DIR) });
+});
+
+app.post("/api/email-dir", (req, res) => {
+  const newDir = req.body && req.body.dir;
+  if (!newDir || typeof newDir !== "string") return res.json({ ok: false, error: "请提供文件夹路径" });
+  const trimmed = newDir.trim();
+  if (!existsSync(trimmed)) return res.json({ ok: false, error: "文件夹不存在: " + trimmed });
+  EMAIL_DIR = trimmed;
+  config.emailDir = trimmed;
+  saveConfig();
+  // Re-scan emails
+  const files = readdirSync(EMAIL_DIR).filter(f =>
+    f.endsWith(".txt") && !f.startsWith("tokens_") && !f.startsWith("merged_") && !f.startsWith("probe") && !f.startsWith("combo")
+  );
+  state.emails = files.map(f => {
+    const content = readFileSync(join(EMAIL_DIR, f), "utf-8").trim();
+    const parts = content.split("----").map(s => s.trim());
+    return { email: parts[0]||"", password: parts[1]||"", clientId: parts[2]||"", refreshToken: parts[3]||"", file: f, status: "pending", handle: "", error: "", progress: "" };
+  }).filter(e => e.email && e.clientId && e.refreshToken);
+  updateStats();
+  broadcast("emails_loaded", { emails: state.emails, stats: state.stats, dir: EMAIL_DIR });
+  console.log("[INFO] Email dir changed to: " + EMAIL_DIR + " (" + state.emails.length + " emails)");
+  res.json({ ok: true, dir: EMAIL_DIR, count: state.emails.length });
+});
+
+// ========== Browser Type API ==========
+app.get("/api/browser-type", (req, res) => {
+  res.json({ browserType: config.browserType, nstApiKey: config.nstApiKey ? "***" + config.nstApiKey.slice(-8) : "", nstApiBase: config.nstApiBase });
+});
+
+app.post("/api/browser-type", (req, res) => {
+  const bt = req.body && req.body.browserType;
+  if (bt !== "chrome" && bt !== "edge" && bt !== "nstbrowser") return res.json({ ok: false, error: "无效浏览器类型" });
+  config.browserType = bt;
+  if (req.body.nstApiKey) config.nstApiKey = req.body.nstApiKey;
+  if (req.body.nstApiBase) config.nstApiBase = req.body.nstApiBase;
+  saveConfig();
+  res.json({ ok: true, browserType: config.browserType });
+});
+
+app.get("/api/nst-profiles", async (req, res) => {
+  try {
+    const data = await nstListProfiles();
+    res.json({ ok: true, profiles: data.docs || [], total: data.totalDocs || 0 });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
   wsClients.add(ws);
   ws.on("close", () => wsClients.delete(ws));
   ws.on("error", () => wsClients.delete(ws));
-  ws.send(JSON.stringify({ type: "init", data: { stats: state.stats, workers: state.workers, running: state.running, concurrency: state.concurrency } }));
+  ws.send(JSON.stringify({ type: "init", data: { stats: state.stats, workers: state.workers, running: state.running, concurrency: state.concurrency, emailDir: EMAIL_DIR, browserType: config.browserType } }));
 });
 
 function killPortAndStart() {
@@ -573,7 +920,7 @@ function killPortAndStart() {
     if (match) { console.log("[INFO] Killing old process on port " + WEB_PORT + " (PID: " + match[1] + ")"); execSync("taskkill /PID " + match[1] + " /F", { stdio: "ignore" }); }
   } catch (e) {}
   server.listen(WEB_PORT, () => {
-    console.log(""); console.log("  ZO Batch Register Server v3"); console.log("  Frontend: http://localhost:" + WEB_PORT); console.log("  Concurrency: " + state.concurrency); console.log("  Email dir: " + EMAIL_DIR); console.log("");
+    console.log(""); console.log("  ZO Batch Register Server v3"); console.log("  Frontend: http://localhost:" + WEB_PORT); console.log("  Concurrency: " + state.concurrency); console.log("  Email dir: " + EMAIL_DIR); console.log("  Config: " + CONFIG_FILE); console.log("");
   });
 }
 killPortAndStart();

@@ -11,6 +11,49 @@ var state = {
   stats: { total: 0, pending: 0, success: 0, fail: 0, inProgress: 0 }
 };
 
+// ===== 自动保活状态 =====
+var keepaliveState = {
+  enabled: false,
+  lastSent: 0,
+  sentCount: 0,
+  lastQuestion: ''
+};
+var KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000; // 30分钟
+var keepaliveTimerId = null;
+
+var keepaliveQuestions = [
+  '你好，今天天气怎么样？',
+  '帮我解释一下什么是机器学习',
+  'Python和JavaScript有什么区别？',
+  '给我讲一个有趣的小故事',
+  '如何提高编程效率？',
+  '推荐几本好书吧',
+  '什么是大语言模型？',
+  '帮我写一首简短的诗',
+  '人工智能的未来发展趋势是什么？',
+  '如何保持学习的动力？',
+  '介绍一下量子计算的基本概念',
+  '有什么好的时间管理方法？',
+  '解释一下区块链技术',
+  '推荐一些提升思维的方法',
+  '什么是API？简单解释一下',
+  '如何开始学习一门新语言？',
+  '云计算和本地部署有什么区别？',
+  '给我一个有趣的科学冷知识',
+  '什么是深度学习？',
+  '如何培养创造性思维？',
+  '介绍一下太空探索的最新进展',
+  '怎样写出好的代码注释？',
+  '什么是自然语言处理？',
+  '推荐一些提高效率的工具',
+  '数据结构和算法为什么重要？',
+  '介绍一下人工智能的应用场景',
+  '如何做好项目管理？',
+  '什么是开源软件？',
+  '解释一下网络安全的基本概念',
+  '怎样快速定位和修复代码bug？'
+];
+
 var TOTAL_STEPS = 10;
 var VERIFY_WAIT_MS = 480000;
 var VERIFY_POLL_MS = 5000;
@@ -94,6 +137,100 @@ function recoverStaleEmails() {
     });
     updateStats();
     doLog("", "⚠ 检测到 " + stale.length + " 个邮箱上次注册中断，已自动重置为待处理");
+  }
+}
+
+// ===== 自动保活功能 =====
+function getRandomKeepaliveQuestion() {
+  // 避免连续重复：从去掉上一个的池子里随机选
+  var pool = keepaliveQuestions;
+  if (keepaliveQuestions.length > 1 && keepaliveState.lastQuestion) {
+    pool = keepaliveQuestions.filter(function(q) { return q !== keepaliveState.lastQuestion; });
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+async function runKeepaliveOnce() {
+  if (!keepaliveState.enabled) return;
+  doLog('', '[保活] 开始执行...');
+  try {
+    // ★ 修复：不用 tabs.query 的通配符子域名（不可靠），改为查所有 zo.computer 标签页后过滤
+    var allTabs = [];
+    try { allTabs = allTabs.concat(await chrome.tabs.query({ url: 'https://www.zo.computer/*' })); } catch (e) {}
+    try { allTabs = allTabs.concat(await chrome.tabs.query({ url: 'https://zo.computer/*' })); } catch (e2) {}
+    try { allTabs = allTabs.concat(await chrome.tabs.query({ url: 'https://*.zo.computer/*' })); } catch (e3) {}
+    // 去重
+    var seen = {};
+    allTabs = allTabs.filter(function(t) {
+      if (!t || seen[t.id]) return false;
+      seen[t.id] = true;
+      return true;
+    });
+    // 筛选出 ZO 主界面的 tab（子域名，非 www/signup）
+    var mainTabs = allTabs.filter(function(t) {
+      try {
+        var h = new URL(t.url).hostname.toLowerCase();
+        return h.endsWith('.zo.computer') && h !== 'www.zo.computer' && h !== 'zo.computer';
+      } catch (e) { return false; }
+    });
+    if (mainTabs.length === 0) {
+      doLog('', '[保活] 未找到 ZO 主界面标签页（共查到 ' + allTabs.length + ' 个 zo 标签页），跳过本次', 'error');
+      broadcast({ type: 'keepalive_state', data: keepaliveState });
+      return;
+    }
+    var tab = mainTabs[0];
+    doLog('', '[保活] 找到标签页: ' + tab.url);
+    await ensureContentScript(tab.id);
+    var question = getRandomKeepaliveQuestion();
+    doLog('', '[保活] 发送问题: ' + question);
+    var resp = await sendToTab(tab.id, { type: 'zo_step', step: 'keepalive_send', text: question }, 30000);
+    doLog('', '[保活] 响应: ' + JSON.stringify(resp));
+    if (resp && resp.ok) {
+      keepaliveState.lastSent = Date.now();
+      keepaliveState.sentCount++;
+      keepaliveState.lastQuestion = question;
+      saveKeepaliveState();
+      doLog('', '[保活] ✅ 已发送: ' + question, 'success');
+    } else {
+      doLog('', '[保活] ❌ 发送失败: ' + (resp ? resp.error : '无响应'), 'error');
+    }
+  } catch (e) {
+    doLog('', '[保活] 异常: ' + e.message, 'error');
+  }
+  broadcast({ type: 'keepalive_state', data: keepaliveState });
+}
+
+function saveKeepaliveState() {
+  try {
+    chrome.storage.local.set({ zo_keepalive: {
+      enabled: keepaliveState.enabled,
+      lastSent: keepaliveState.lastSent,
+      sentCount: keepaliveState.sentCount,
+      lastQuestion: keepaliveState.lastQuestion
+    }}, function() {});
+  } catch (e) {}
+}
+
+function startKeepaliveTimer() {
+  stopKeepaliveTimer();
+  // 使用 chrome.alarms（SW 休眠后仍可靠唤醒）
+  try {
+    // ★ 关键修复：设置 delayInMinutes=0.1（约6秒后首次触发），不能只设 periodInMinutes
+    // 否则首次触发要等完整30分钟周期
+    chrome.alarms.create('zo_keepalive', { delayInMinutes: 0.1, periodInMinutes: 30 });
+    doLog('', '[保活] chrome.alarms 已设置，约6秒后首次触发，之后每30分钟');
+  } catch (e) {
+    // 回退：用 setInterval（仅在 alarms 不可用时）
+    keepaliveTimerId = setInterval(runKeepaliveOnce, KEEPALIVE_INTERVAL_MS);
+    doLog('', '[保活] setInterval 回退已设置');
+  }
+}
+
+function stopKeepaliveTimer() {
+  try { chrome.alarms.clear('zo_keepalive'); } catch (e) {}
+  if (keepaliveTimerId) {
+    clearInterval(keepaliveTimerId);
+    keepaliveTimerId = null;
   }
 }
 
@@ -217,6 +354,28 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
       return false;
     }
 
+    if (msg.type === "keepalive_toggle") {
+      keepaliveState.enabled = !keepaliveState.enabled;
+      if (keepaliveState.enabled) {
+        startKeepaliveTimer();
+        // 立即发送第一条（异步执行，完成后广播状态更新）
+        runKeepaliveOnce().then(function() {
+          saveKeepaliveState();
+          broadcast({ type: 'keepalive_state', data: keepaliveState });
+        });
+      } else {
+        stopKeepaliveTimer();
+      }
+      saveKeepaliveState();
+      sendResponse({ ok: true, enabled: keepaliveState.enabled, data: keepaliveState });
+      return false;
+    }
+
+    if (msg.type === "keepalive_get_state") {
+      sendResponse({ ok: true, data: keepaliveState });
+      return false;
+    }
+
     if (msg.type === "content_ready") {
       doLog("", "内容脚本已注入: " + msg.url);
       return false;
@@ -286,7 +445,7 @@ async function findMagicLink(accessToken, afterTime) {
     var all = hrefs.map(function(h) { return h.replace(/^href=["']/i, "").replace(/["']$/, ""); }).concat(raws);
     for (var j = 0; j < all.length; j++) {
       var link = all[j].replace(/[)\]>,;!?\s]+$/, "").replace(/&amp;/g, "&").replace(/&#38;/g, "&").replace(/&#61;/g, "=");
-      if (/token=|verify|login|sign/i.test(link)) return link;
+      if (/token=|verify|login|sign|验证|登录|注册/i.test(link)) return link;
     }
   }
   return null;
@@ -478,6 +637,30 @@ async function doRegisterOne(emailItem) {
     await sleepWithStop(1000, email);
     checkStop(email);
 
+    // ★ Step 6b: 主动处理 Cloudflare Turnstile
+    stepLog(email, 6.5, "检测并处理 Cloudflare Turnstile");
+    var tsHandled = false;
+    for (var tsAttempt = 0; tsAttempt < 3; tsAttempt++) {
+      var tsResp = await sendToTab(tab.id, { type: "zo_step", step: "turnstile_check" }, 15000);
+      if (tsResp && tsResp.stage === "turnstile_solving") {
+        doLog(email, "[Turnstile] 检测到 Turnstile 挑战，正在自动处理 (尝试 " + (tsAttempt + 1) + "/3)...");
+        await sleepWithStop(6000, email);
+        tsHandled = true;
+      } else if (tsResp && tsResp.stage === "turnstile_ready") {
+        doLog(email, "[Turnstile] 令牌已就绪，等待页面跳转");
+        await sleepWithStop(3000, email);
+        tsHandled = true;
+        break;
+      } else {
+        // 没有 Turnstile 或已完成
+        break;
+      }
+    }
+    if (tsHandled) {
+      doLog(email, "[Turnstile] 处理完成");
+    }
+    checkStop(email);
+
     stepLog(email, 7, "等待邮箱链接验证完成");
     resp = await waitForVerifyStep(tab.id, email);
     doLog(email, '[验证] waitForVerifyStep 返回: ' + JSON.stringify(resp));
@@ -625,13 +808,31 @@ chrome.sidePanel.setOptions({ path: "sidepanel/sidepanel.html", enabled: true })
 
 console.log("[ZO] Background started");
 
+// chrome.alarms 唤醒处理
+chrome.alarms.onAlarm.addListener(function(alarm) {
+  if (alarm.name === 'zo_keepalive') {
+    runKeepaliveOnce();
+  }
+});
+
 // SW 启动时从 storage 恢复状态，然后清理僵尸邮箱
-chrome.storage.local.get({ zo_emails: [], zo_config: {} }, function(data) {
+chrome.storage.local.get({ zo_emails: [], zo_config: {}, zo_keepalive: null }, function(data) {
   if (data.zo_emails && data.zo_emails.length > 0) {
     state.emails = data.zo_emails;
     state.concurrency = 1;
     recoverStaleEmails();
     doLog("", "✅ 已从存储恢复 " + state.emails.length + " 个邮箱");
+  }
+  // 恢复保活状态
+  if (data.zo_keepalive) {
+    keepaliveState.enabled = !!data.zo_keepalive.enabled;
+    keepaliveState.lastSent = data.zo_keepalive.lastSent || 0;
+    keepaliveState.sentCount = data.zo_keepalive.sentCount || 0;
+    keepaliveState.lastQuestion = data.zo_keepalive.lastQuestion || '';
+    if (keepaliveState.enabled) {
+      startKeepaliveTimer();
+      doLog('', '[保活] 已从存储恢复，自动保活已开启');
+    }
   }
 });
 

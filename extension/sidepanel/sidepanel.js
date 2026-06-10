@@ -8,6 +8,9 @@
   var emails = [];
   var stats = {};
   var isRunning = false;
+  var keepaliveEnabled = false;
+  var countdownTimerId = null;
+  var COUNTDOWN_INTERVAL = 30 * 60 * 1000; // 30分钟
 
   function badgeHtml(s) {
     var m = { pending: '⏳ 待处理', registering: '⚡ 注册中', success: '✅ 成功', fail: '❌ 失败', registered: '🔄 已注册' };
@@ -356,6 +359,16 @@
         addLog('', '🗑 已清空所有邮箱');
       });
     });
+
+    // 自动保活按钮
+    document.getElementById('btnKeepalive').addEventListener('click', function() {
+      sendMsg({ type: 'keepalive_toggle' }, function(resp) {
+        if (resp && resp.ok) {
+          updateKeepaliveUI(resp.enabled, resp.data);
+          addLog('', resp.enabled ? '🟢 自动保活已开启，正在发送第一条...' : '🔴 自动保活已关闭');
+        }
+      });
+    });
   }
 
   // ========== 监听 background 推送 ==========
@@ -401,10 +414,93 @@
       document.getElementById('btnStart').disabled = false;
       document.getElementById('btnStop').disabled = true;
     }
+    if (msg.type === 'keepalive_state') {
+      updateKeepaliveUI(!!msg.data.enabled, msg.data);
+    }
   });
+
+  // ========== 保活 UI ==========
+  function updateKeepaliveUI(enabled, data) {
+    keepaliveEnabled = enabled;
+    var btn = document.getElementById('btnKeepalive');
+    var statusEl = document.getElementById('keepaliveStatus');
+    var countdownEl = document.getElementById('keepaliveCountdown');
+    if (enabled) {
+      btn.textContent = '\u23F9 关闭保活';
+      btn.className = 'btn btn-danger';
+      statusEl.textContent = '\u25CF 运行中';
+      statusEl.className = 'keepalive-status active';
+      countdownEl.style.display = 'block';
+    } else {
+      btn.textContent = '\u25B6 开启保活';
+      btn.className = 'btn btn-secondary';
+      statusEl.textContent = '已关闭';
+      statusEl.className = 'keepalive-status inactive';
+      countdownEl.style.display = 'none';
+      stopCountdown();
+    }
+    if (data) {
+      if (data.lastSent && data.lastSent > 0) {
+        var d = new Date(data.lastSent);
+        document.getElementById('keepaliveLastSent').textContent = '\u4E0A\u6B21\u53D1\u9001: ' + d.toLocaleTimeString();
+      } else {
+        document.getElementById('keepaliveLastSent').textContent = '\u4E0A\u6B21\u53D1\u9001: --';
+      }
+      document.getElementById('keepaliveCount').textContent = '\u5DF2\u53D1\u9001: ' + (data.sentCount || 0) + ' \u6761';
+    }
+    if (enabled) {
+      var fromTime = (data && data.lastSent > 0) ? data.lastSent : Date.now();
+      startCountdown(fromTime);
+    }
+  }
+
+  function startCountdown(lastSent) {
+    stopCountdown();
+    var nextSend = lastSent + COUNTDOWN_INTERVAL;
+    var hitZero = false;
+    function tick() {
+      var remaining = nextSend - Date.now();
+      if (remaining <= 0) {
+        document.getElementById('countdownTime').textContent = '00:00';
+        if (!hitZero) {
+          hitZero = true;
+          sendMsg({ type: 'keepalive_get_state' }, function(resp) {
+            if (resp && resp.ok && resp.data) {
+              if (resp.data.lastSent > lastSent) {
+                startCountdown(resp.data.lastSent);
+              } else {
+                startCountdown(Date.now());
+              }
+            }
+          });
+        }
+        return;
+      }
+      hitZero = false;
+      var min = Math.floor(remaining / 60000);
+      var sec = Math.floor((remaining % 60000) / 1000);
+      document.getElementById('countdownTime').textContent =
+        String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+    }
+    tick();
+    countdownTimerId = setInterval(tick, 1000);
+  }
+
+  function stopCountdown() {
+    if (countdownTimerId) {
+      clearInterval(countdownTimerId);
+      countdownTimerId = null;
+    }
+  }
 
   // ========== 初始化 ==========
   bindEvents();
   loadState();
+  // 加载保活状态
+  sendMsg({ type: 'keepalive_get_state' }, function(resp) {
+    if (resp && resp.ok && resp.data) {
+      updateKeepaliveUI(!!resp.data.enabled, resp.data);
+    }
+  });
   addLog('', '插件已加载');
 })();

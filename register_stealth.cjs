@@ -73,6 +73,18 @@ async function main() {
   const page = pages[0];
   await page.setViewport({ width: 1440, height: 900 });
 
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
+
   // Step 1: 打开注册页
   console.log("\n[1/5] Opening signup...");
   await page.goto("https://www.zo.computer/signup", { waitUntil: "networkidle2", timeout: 30000 });
@@ -133,16 +145,44 @@ async function main() {
   console.log("Body:", bodyText.substring(0, 200));
   await page.screenshot({ path: "E:\\API获取工具\\ZO注册\\stealth_verify.png", fullPage: false });
 
-  // 等待 Turnstile 自动完成（stealth 模式下应该能自动通过）
+  // 等待 Turnstile 自动完成（stealth + screenX/screenY 补丁）
   console.log("[5/5] Waiting for Turnstile to auto-complete...");
-  
+
   for (let i = 1; i <= 12; i++) {
     await sleep(5000);
     url = page.url();
     bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "");
     console.log("[#" + i + "] URL: " + url.substring(0, 60) + "...");
     console.log("  Body: " + bodyText.substring(0, 150));
-    
+
+    // ★ 主动通过 turnstile API 获取令牌
+    const tsResult = await page.evaluate(() => {
+      try {
+        if (typeof turnstile !== 'undefined') {
+          const res = turnstile.getResponse();
+          if (res) {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) {
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(input, res);
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return { ok: true, tokenLen: res.length };
+          }
+          try { turnstile.reset(); } catch(e) {}
+        }
+      } catch (e) {}
+      try {
+        const input = document.querySelector('input[name="cf-turnstile-response"]');
+        if (input && input.value) return { ok: true, tokenLen: input.value.length };
+      } catch (e) {}
+      return { ok: false };
+    }).catch(() => ({ ok: false }));
+
+    if (tsResult.ok) {
+      console.log("  [Turnstile] Token obtained! len=" + tsResult.tokenLen);
+    }
+
     // 如果页面显示 "Continue in browser"，点击它
     if (/continue in browser/i.test(bodyText)) {
       console.log("  Clicking 'Continue in browser'...");

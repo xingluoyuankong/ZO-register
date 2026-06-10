@@ -60,3 +60,13 @@ label { font-size: 11px; color: #888; }
 
 .email-item .del-btn { padding: 3px 8px; font-size: 10px; }
 .email-item .reg-btn { min-width: 42px; }
+
+/* ===== 自动保活 ===== */
+.keepalive-area { padding: 4px 0; }
+.keepalive-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.keepalive-status { font-size: 12px; font-weight: 600; }
+.keepalive-status.active { color: #22c55e; }
+.keepalive-status.inactive { color: #888; }
+.keepalive-info { display: flex; gap: 16px; font-size: 11px; color: #888; margin-bottom: 8px; }
+.keepalive-hint { font-size: 10px; color: #555; line-height: 1.5; }
+.keepalive-countdown { font-size: 20px; font-weight: 700; color: #22c55e; text-align: center; padding: 6px 0; font-family: monospace; letter-spacing: 2px; }

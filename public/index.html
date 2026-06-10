@@ -37,6 +37,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .btn-stop { background: #ef4444; color: white; }
 .btn-stop:hover { background: #dc2626; }
 .btn-stop:disabled { background: #444; cursor: not-allowed; }
+.btn-apply { background: #22c55e; color: white; }
+.btn-apply:hover { background: #16a34a; }
+.btn-browse { background: #333; color: #aaa; border: 1px solid #444; }
+.btn-browse:hover { background: #444; color: #e0e0e0; }
+.btn-register-one { background: #6366f1; color: white; padding: 4px 12px; border: none; border-radius: 6px; font-size: 11px; cursor: pointer; }
+.btn-register-one:hover { background: #5558e6; }
+.btn-register-one:disabled { background: #444; cursor: not-allowed; }
 
 /* Worker 状态 */
 .workers { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -91,8 +98,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     <div class="stat-card fail"><div class="label">失败</div><div class="value" id="sFail">0</div></div>
   </div>
 
+  <!-- 邮箱文件夹 -->
+  <div class="controls" style="margin-bottom:12px">
+    <label>📁 邮箱文件夹</label>
+    <input type="text" id="emailDirInput" placeholder="输入邮箱文件夹路径..." style="flex:1;min-width:300px" />
+    <button class="btn btn-apply" id="btnApplyDir" onclick="applyEmailDir()">✓ 应用</button>
+    <button class="btn btn-browse" onclick="browseEmailDir()">📂 浏览...</button>
+    <span id="dirStatus" style="font-size:12px;color:#888"></span>
+  </div>
+
   <!-- 控制栏 -->
   <div class="controls">
+    <label>浏览器</label>
+    <select id="browserType" onchange="changeBrowserType()">
+      <option value="edge" selected>Edge (无痕)</option>
+      <option value="chrome">Chrome (无痕)</option>
+      <option value="nstbrowser">Nstbrowser (指纹)</option>
+    </select>
     <label>并发数</label>
     <select id="concurrency">
       <option value="1">1</option>
@@ -117,7 +139,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     </div>
     <table class="email-table">
       <thead>
-        <tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th></tr>
+        <tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th><th>操作</th></tr>
       </thead>
       <tbody id="emailBody">
         <tr><td colspan="6" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr>
@@ -157,6 +179,8 @@ function connect() {
         updateWorkers(msg.data.workers);
         setRunning(msg.data.running);
         if (msg.data.concurrency) document.getElementById('concurrency').value = msg.data.concurrency;
+        if (msg.data.emailDir) document.getElementById('emailDirInput').value = msg.data.emailDir;
+        if (msg.data.browserType) document.getElementById('browserType').value = msg.data.browserType;
         break;
       case 'stats': updateStats(msg.data); break;
       case 'email_update': updateEmailRow(msg.data); break;
@@ -166,6 +190,12 @@ function connect() {
       case 'batch_done': setRunning(false); addLog('', '✅ 批量注册完成'); break;
       case 'batch_stop': setRunning(false); addLog('', '⏹ 已手动停止'); break;
       case 'error': addLog('', '⚠️ ' + msg.data.msg); break;
+      case 'emails_loaded':
+        emails = msg.data.emails;
+        updateStats(msg.data.stats);
+        renderTable();
+        if (msg.data.dir) document.getElementById('emailDirInput').value = msg.data.dir;
+        break;
     }
   };
 }
@@ -198,6 +228,19 @@ function updateEmailRow(data) {
   if (data.handle) tr.querySelector('.handle').textContent = data.handle;
   if (data.progress) tr.querySelector('.progress').textContent = data.progress;
   if (data.error) tr.querySelector('.err').textContent = data.error;
+  const btn = tr.querySelector('.btn-register-one');
+  if (btn) {
+    if (data.status === 'registering' || data.status === 'success') {
+      btn.disabled = true;
+      btn.textContent = data.status === 'success' ? '✓' : '注册中...';
+    } else if (data.status === 'fail') {
+      btn.disabled = false;
+      btn.textContent = '重试';
+    } else {
+      btn.disabled = false;
+      btn.textContent = '注册';
+    }
+  }
 }
 
 function badge(status) {
@@ -211,6 +254,7 @@ async function loadEmails() {
   emails = data.emails;
   updateStats(data.stats);
   renderTable();
+  loadEmailDir();
 }
 
 function renderTable() {
@@ -229,6 +273,7 @@ function renderTable() {
     '<td class="handle" style="color:#6366f1">' + (e.handle || '-') + '</td>' +
     '<td class="progress" style="color:#888">' + (e.progress || '-') + '</td>' +
     '<td class="err error" title="' + (e.error || '') + '">' + (e.error || '-') + '</td>' +
+    '<td><button class="btn-register-one" onclick="registerOne(\'' + e.email + '\')" ' + (e.status === 'registering' || e.status === 'success' ? 'disabled' : '') + '>注册</button></td>' +
     '</tr>'
   ).join('');
 }
@@ -254,7 +299,133 @@ function addLog(email, msg) {
   div.scrollTop = div.scrollHeight;
 }
 
+// ========== 邮箱文件夹管理 ==========
+async function loadEmailDir() {
+  try {
+    const resp = await fetch('/api/email-dir');
+    const data = await resp.json();
+    document.getElementById('emailDirInput').value = data.dir || '';
+    const status = document.getElementById('dirStatus');
+    if (data.exists) {
+      status.innerHTML = '<span style="color:#22c55e">✓ 路径有效</span>';
+    } else {
+      status.innerHTML = '<span style="color:#ef4444">✗ 路径不存在</span>';
+    }
+  } catch (e) {}
+}
+
+async function applyEmailDir() {
+  const input = document.getElementById('emailDirInput');
+  const dir = input.value.trim();
+  if (!dir) { alert('请输入文件夹路径'); return; }
+  const btn = document.getElementById('btnApplyDir');
+  btn.disabled = true; btn.textContent = '应用中...';
+  try {
+    const resp = await fetch('/api/email-dir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dir })
+    });
+    const data = await resp.json();
+    const status = document.getElementById('dirStatus');
+    if (data.ok) {
+      status.innerHTML = '<span style="color:#22c55e">✓ 已切换 (' + data.count + ' 个邮箱)</span>';
+      addLog('', '📁 邮箱文件夹已切换: ' + dir);
+      loadEmails();
+    } else {
+      status.innerHTML = '<span style="color:#ef4444">✗ ' + data.error + '</span>';
+    }
+  } catch (e) {
+    document.getElementById('dirStatus').innerHTML = '<span style="color:#ef4444">✗ 请求失败</span>';
+  } finally {
+    btn.disabled = false; btn.textContent = '✓ 应用';
+  }
+}
+
+async function browseEmailDir() {
+  try {
+    if ('showDirectoryPicker' in window) {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      // File System Access API gives us a handle, but we need the actual path
+      // Unfortunately, the API doesn't expose the real path. Fallback to prompt.
+      const path = prompt('请输入文件夹路径（浏览器无法直接获取文件夹路径，请手动输入）：', document.getElementById('emailDirInput').value);
+      if (path) {
+        document.getElementById('emailDirInput').value = path;
+        applyEmailDir();
+      }
+    } else {
+      const path = prompt('请输入邮箱文件夹的完整路径：', document.getElementById('emailDirInput').value);
+      if (path) {
+        document.getElementById('emailDirInput').value = path;
+        applyEmailDir();
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      const path = prompt('请输入邮箱文件夹的完整路径：', document.getElementById('emailDirInput').value);
+      if (path) {
+        document.getElementById('emailDirInput').value = path;
+        applyEmailDir();
+      }
+    }
+  }
+}
+
+// ========== 单个注册 ==========
+async function registerOne(email) {
+  if (!confirm('确认注册 ' + email + ' ？')) return;
+  const btn = document.querySelector('tr[data-email="' + email + '"] .btn-register-one');
+  if (btn) { btn.disabled = true; btn.textContent = '注册中...'; }
+  try {
+    const resp = await fetch('/api/register-one', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email })
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      addLog(email, '⚠️ ' + data.error);
+      if (btn) { btn.disabled = false; btn.textContent = '注册'; }
+    }
+  } catch (e) {
+    addLog(email, '⚠️ 请求失败');
+    if (btn) { btn.disabled = false; btn.textContent = '注册'; }
+  }
+}
+
+// ========== 浏览器类型 ==========
+async function loadBrowserType() {
+  try {
+    const resp = await fetch('/api/browser-type');
+    const data = await resp.json();
+    document.getElementById('browserType').value = data.browserType || 'chrome';
+  } catch (e) {}
+}
+
+async function changeBrowserType() {
+  const bt = document.getElementById('browserType').value;
+  try {
+    const resp = await fetch('/api/browser-type', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ browserType: bt })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const names = { chrome: 'Chrome (无痕)', edge: 'Edge (无痕)', nstbrowser: 'Nstbrowser (指纹)' };
+      addLog('', '🌐 浏览器已切换: ' + (names[bt] || bt));
+    }
+  } catch (e) {}
+}
+
+// 回车键应用
+document.getElementById('emailDirInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') applyEmailDir();
+});
+
 // 初始化
+loadBrowserType();
+loadEmailDir();
 loadEmails();
 connect();
 </script>

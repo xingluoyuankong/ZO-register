@@ -113,6 +113,20 @@ def register_one(email_file):
         page = ctx.new_page()
         Stealth().apply_stealth_sync(page)
 
+        # ★ 注入 Cloudflare Turnstile 绕过补丁
+        page.add_init_script("""
+if (!window.__TURNSTILE_PATCHED__) {
+  window.__TURNSTILE_PATCHED__ = true;
+  var _offX = Math.floor(Math.random() * 121) + 80;
+  var _offY = Math.floor(Math.random() * 91) + 60;
+  try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true }); } catch(e) {}
+}
+""")
+
         # Step 1: Open signup
         log("[1] Opening signup...")
         page.goto("https://www.zo.computer/signup", wait_until="domcontentloaded", timeout=30000)
@@ -175,6 +189,33 @@ def register_one(email_file):
             if 'choose' in body.lower() or 'handle' in body.lower():
                 log("[OK] Handle page!")
                 break
+
+            # ★ 主动通过 turnstile API 获取令牌
+            ts_result = page.evaluate("""() => {
+                try {
+                    if (typeof turnstile !== 'undefined') {
+                        var res = turnstile.getResponse();
+                        if (res) {
+                            var input = document.querySelector('input[name="cf-turnstile-response"]');
+                            if (input) {
+                                var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                                setter.call(input, res);
+                                input.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                            return { ok: true, len: res.length };
+                        }
+                        try { turnstile.reset(); } catch(e) {}
+                    }
+                } catch(e) {}
+                try {
+                    var input = document.querySelector('input[name="cf-turnstile-response"]');
+                    if (input && input.value) return { ok: true, len: input.value.length };
+                } catch(e) {}
+                return { ok: false };
+            }""")
+            if ts_result and ts_result.get('ok'):
+                log(f"  [Turnstile] Token obtained! len={ts_result.get('len')}")
+
             if 'continue in browser' in body.lower():
                 page.evaluate("""() => {
                     for (const el of document.querySelectorAll('*')) {

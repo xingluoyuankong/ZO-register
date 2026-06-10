@@ -28,6 +28,18 @@ async function main() {
   const page = pages[0];
   await page.setViewport({ width: 1440, height: 900 });
   
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
+
   // ========== Step 1: 在 ZO 注册页填写邮箱 ==========
   console.log("\n[Step 1] Opening ZO signup...");
   await page.goto("https://www.zo.computer/signup", { waitUntil: "networkidle2", timeout: 30000 });

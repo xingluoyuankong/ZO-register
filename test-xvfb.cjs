@@ -17,6 +17,18 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   const p = await b.newPage();
   await p.setViewport({ width: 1440, height: 900 });
 
+  // ★ 注入 Turnstile 绕过补丁
+  await p.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
+
   const magicLink = 'https://www.zo.computer/api/email-login/verify?redirect=%2Fsignup&token=eyJhbGciOiJFUzI1NiIsImtpZCI6IjkxYmU5Yjk3LTMzM2ItNDQxMC04NmEwLTUyYTUyNzAwZDcxNSIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImhpbGxqdWxpYTVlczd5ODFjNnU4YUBvdXRsb29rLmNvbSIsIm5vbmNlIjoiNzVhYmU1MTMtMTY1My00ZDYwLWE2YjQtODA5NWZkYzNlMmIzIiwiZXhwIjoxNzgwNTkzNDczLCJpc3MiOiJodHRwczovL2F1dGguem8uY29tcHV0ZXIiLCJhdWQiOiJvbi1zdWJzdHJhdGUifQ.jlTCBNTBpUiHUn6QvaMxUt9l4HCKHc-fnxhqyzcgnB4o6Zre0mCOSpQsHwm3b8KzIZxgsrAPeNfxwc5RhEeHfA';
 
   console.log('Opening magic link...');

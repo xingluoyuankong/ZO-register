@@ -70,9 +70,19 @@ async function main() {
   const page = pages[0];
   await page.setViewport({ width: 1440, height: 900 });
 
-  // Step 1: 注入反检测脚本（在任何页面加载之前）
-  console.log("\n[0/5] Injecting anti-detection...");
+  // Step 1: 注入反检测脚本 + Turnstile 绕过补丁
+  console.log("\n[0/5] Injecting anti-detection + Turnstile patch...");
   await page.evaluateOnNewDocument(() => {
+    // ★ Cloudflare Turnstile 绕过：劫持 screenX/screenY
+    if (!window.__TURNSTILE_PATCHED__) {
+      window.__TURNSTILE_PATCHED__ = true;
+      var _offX = Math.floor(Math.random() * 121) + 80;
+      var _offY = Math.floor(Math.random() * 91) + 60;
+      try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+      try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+      try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+      try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    }
     // 隐藏 webdriver 标志
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
     // 伪造 plugins
@@ -144,6 +154,24 @@ async function main() {
   // 检查 Turnstile hidden input 是否被填充
   for (let i = 1; i <= 20; i++) {
     const turnstileState = await page.evaluate(() => {
+      // ★ 主动通过 turnstile API 获取令牌
+      try {
+        if (typeof turnstile !== 'undefined') {
+          const res = turnstile.getResponse();
+          if (res) {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) {
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(input, res);
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return { gotToken: true, tokenLen: res.length };
+          }
+          // 尝试 reset
+          try { turnstile.reset(); } catch(e) {}
+        }
+      } catch (e) {}
+
       // 查找所有可能的 Turnstile 响应输入
       const inputs = document.querySelectorAll('input[name*="cf"], input[name*="turnstile"], input[type="hidden"]');
       const values = {};
@@ -161,18 +189,23 @@ async function main() {
       const isRedirecting = /redirecting|hang tight/i.test(body);
       const isInvalid = /invalid|expired/i.test(body);
       
-      return { values, iframeInfo, isVerifying, isRedirecting, isInvalid };
+      return { gotToken: false, values, iframeInfo, isVerifying, isRedirecting, isInvalid };
     });
-    
+
     console.log("[#" + i + "] Turnstile inputs:", JSON.stringify(turnstileState.values));
     if (turnstileState.iframeInfo.length > 0) console.log("  Iframes:", JSON.stringify(turnstileState.iframeInfo));
     console.log("  Verifying=" + turnstileState.isVerifying + " Redirecting=" + turnstileState.isRedirecting + " Invalid=" + turnstileState.isInvalid);
-    
+
     // 如果已经跳转或过期，停止等待
     if (turnstileState.isRedirecting || turnstileState.isInvalid) break;
-    
+
+    // ★ 如果通过 turnstile API 直接获取到了令牌
+    if (turnstileState.gotToken) {
+      console.log("  [Turnstile] Token obtained via API! len=" + turnstileState.tokenLen);
+    }
+
     // 如果 Turnstile 响应已填充，点击 Continue
-    const hasResponse = Object.values(turnstileState.values).some(v => v && v.length > 10);
+    const hasResponse = turnstileState.gotToken || Object.values(turnstileState.values).some(v => v && v.length > 10);
     if (hasResponse) {
       console.log("  Turnstile response detected! Clicking Continue...");
       await page.evaluate(() => {

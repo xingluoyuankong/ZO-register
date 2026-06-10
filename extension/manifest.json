@@ -12,7 +12,8 @@
     "webNavigation",
     "cookies",
     "browsingData",
-    "downloads"
+    "downloads",
+    "alarms"
   ],
   "host_permissions": [
     "https://www.zo.computer/*",
@@ -28,6 +29,13 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "content_scripts": [
+    {
+      "matches": ["https://www.zo.computer/*", "https://zo.computer/*", "https://challenges.cloudflare.com/*"],
+      "js": ["turnstile-patch/script.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
     {
       "matches": ["https://www.zo.computer/*", "https://zo.computer/*"],
       "js": ["content/content.js"],

@@ -71,6 +71,17 @@ async function pollMagicLink(clientId, refreshToken, afterTime, maxWaitMs) {
 // ====== 注册阶段1: 获取魔法链接 ======
 async function getMagicLink(browser, email, clientId, refreshToken) {
   const page = await browser.newPage();
+  // ★ 注入 Turnstile 绕过补丁
+  await page.evaluateOnNewDocument(() => {
+    if (window.__TURNSTILE_PATCHED__) return;
+    window.__TURNSTILE_PATCHED__ = true;
+    var _offX = Math.floor(Math.random() * 121) + 80;
+    var _offY = Math.floor(Math.random() * 91) + 60;
+    try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+    try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+  });
   try {
     await page.goto('https://www.zo.computer/signup', { waitUntil: 'networkidle2', timeout: 30000 });
     await sleep(2000);
@@ -148,6 +159,36 @@ async function completeRegistration(page, magicLink, email) {
       log('  ❌ Link expired/invalid');
       await page.screenshot({ path: join(REG_DIR, 'fail_' + Date.now() + '.png') });
       return null;
+    }
+
+    // ★ 主动通过 turnstile API 获取令牌
+    if (/verifying|browser check|turnstile/i.test(txt) || i >= 3) {
+      const tsResult = await page.evaluate(() => {
+        try {
+          if (typeof turnstile !== 'undefined') {
+            const res = turnstile.getResponse();
+            if (res) {
+              const input = document.querySelector('input[name="cf-turnstile-response"]');
+              if (input) {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(input, res);
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              return { ok: true, tokenLen: res.length };
+            }
+            try { turnstile.reset(); } catch(e) {}
+          }
+        } catch(e) {}
+        try {
+          const input = document.querySelector('input[name="cf-turnstile-response"]');
+          if (input && input.value) return { ok: true, tokenLen: input.value.length };
+        } catch(e) {}
+        return { ok: false };
+      }).catch(() => ({ ok: false }));
+
+      if (tsResult.ok) {
+        log('  [Turnstile] Token obtained! len=' + tsResult.tokenLen);
+      }
     }
 
     // Click Continue in browser
@@ -281,6 +322,17 @@ async function main() {
 
       // Phase 2: Complete registration
       const regPage = await browser.newPage();
+      // ★ 注入 Turnstile 绕过补丁
+      await regPage.evaluateOnNewDocument(() => {
+        if (window.__TURNSTILE_PATCHED__) return;
+        window.__TURNSTILE_PATCHED__ = true;
+        var _offX = Math.floor(Math.random() * 121) + 80;
+        var _offY = Math.floor(Math.random() * 91) + 60;
+        try { Object.defineProperty(MouseEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(MouseEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(PointerEvent.prototype, 'screenX', { get: function() { return (this.clientX||0) + _offX; }, configurable: true }); } catch(e) {}
+        try { Object.defineProperty(PointerEvent.prototype, 'screenY', { get: function() { return (this.clientY||0) + _offY; }, configurable: true }); } catch(e) {}
+      });
       try {
         const result = await completeRegistration(regPage, mlResult.link, email);
         if (result && result.success) success++; else fail++;
