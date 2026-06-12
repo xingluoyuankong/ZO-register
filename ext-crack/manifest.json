@@ -1,0 +1,14 @@
+{
+    "manifest_version": 3,
+    "name": "Turnstile Click Bypass",
+    "version": "1.0",
+    "content_scripts": [{
+        "js": ["./patch.js"],
+        "matches": ["<all_urls>"],
+        "run_at": "document_start",
+        "all_frames": true,
+        "world": "MAIN"
+    }],
+    "permissions": ["tabs"],
+    "host_permissions": ["<all_urls>"]
+}
