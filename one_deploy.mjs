@@ -40,25 +40,34 @@ async function findWidget(cdp) {
 
 // ★ 在终端里的textarea逐字输入（最简单可靠的方式）
 async function terminalTypeCmd(page, cmd) {
-  // 找xterm的textarea
-  const ta = await page.$('.xterm-helper-textarea');
-  if (ta) {
-    await ta.focus();
-    await ta.click();
-  } else {
-    // 找个textarea
-    const anyTa = await page.$('textarea');
-    if (anyTa) { await anyTa.focus(); await anyTa.click(); }
+  try {
+    // 找xterm的textarea
+    const ta = await page.$('.xterm-helper-textarea');
+    if (ta) {
+      await ta.focus();
+      await ta.click();
+    } else {
+      const anyTa = await page.$('textarea');
+      if (anyTa) { await anyTa.focus(); await anyTa.click(); }
+    }
+    await sleep(300);
+  } catch(e) {
+    log(`  聚焦失败: ${e.message}`);
+    return;
   }
-  await sleep(300);
   
   // 逐字输入
   for (const ch of cmd) {
-    await page.keyboard.type(ch);
-    await sleep(10); // 小延迟防止太快
+    try {
+      await page.keyboard.type(ch);
+      await sleep(10);
+    } catch(e) {
+      log(`  输入中断: ${e.message}`);
+      return;
+    }
   }
   await sleep(500);
-  await page.keyboard.press('Enter');
+  try { await page.keyboard.press('Enter'); } catch(e) {}
 }
 
 async function main() {
@@ -103,24 +112,34 @@ async function main() {
 
   // ===== 等待ZO桌面 =====
   log('等待ZO桌面(60s)...');
+  let zoHost = host;
   await sleep(60000);
 
   // ===== 打开终端 =====
   log('打开终端(Ctrl+`)...');
-  await page.keyboard.press('Control+Backquote');
-  await sleep(10000);
+  try {
+    const currentUrl = page.url();
+    log(`  当前页面: ${currentUrl.substring(0, 60)}`);
+    await page.keyboard.press('Control+Backquote');
+    await sleep(10000);
+  } catch(e) {
+    log(`  终端打开失败: ${e.message}，重导航...`);
+    try { await page.goto(`https://${zoHost}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch(e2) {}
+    await sleep(15000);
+    try { await page.keyboard.press('Control+Backquote'); } catch(e3) {}
+    await sleep(5000);
+  }
 
   // ===== ★ 核心：一条命令部署 =====
-  // setup.sh 里包含了所有步骤（安装依赖+下载脚本+启动保活+验证）
   const SETUP_CMD = 'curl -fsSL https://raw.githubusercontent.com/xingluoyuankong/ZO-register/master/setup.sh | bash';
 
-  log(`\n执行部署命令: ${SETUP_CMD}`);
+  log(`\n执行部署: ${SETUP_CMD}`);
   await terminalTypeCmd(page, SETUP_CMD);
-  log('  已发送，等待执行(120s)...');
+  log('等待执行(120s)...');
   await sleep(120000);
 
   // ===== 验证 =====
-  log('\n验证部署结果...');
+  log('\n验证...');
   await terminalTypeCmd(page, 'ps aux | grep -v grep | grep keepalive && echo RUNNING || echo NOT_RUNNING');
   await sleep(10000);
   await terminalTypeCmd(page, 'curl -s localhost:3000/api/state | head -20');

@@ -18,18 +18,24 @@ const log = msg => { const m = `[${now()}] ${msg}`; console.log(m); appendFileSy
 async function main() {
   const { chromium } = await import('playwright');
   const context = await chromium.launchPersistentContext(
-    join(homedir(), 'AppData', 'Local', 'zo-panel-test'),
+    join(homedir(), 'AppData', 'Local', 'zo-panel-path'),
     { headless: false, executablePath: 'C:\\Users\\XZXyuan\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe', args: [`--disable-extensions-except=${EXT_DIR}`, `--load-extension=${EXT_DIR}`, '--disable-blink-features=AutomationControlled', '--window-size=1440,900'] }
   );
   const page = context.pages()[0] || await context.newPage();
 
-  // 打开ZO桌面
-  log('打开ZO...');
+  // 直接用持久化session打开ZO桌面
+  log('打开ZO桌面...');
   try { await page.goto('https://builderpcux.zo.computer', { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch(e) {}
   await sleep(10000);
 
   const url = page.url();
   log(`URL: ${url}`);
+  
+  if (url.includes('signup') || url.includes('www.zo.computer')) {
+    log('Session过期，需要重新登录。跳过。');
+    await context.close();
+    return;
+  }
 
   // 在ZO页面内通过fetch测试keepalive面板
   log('\n===== 测试面板可访问性 =====');
