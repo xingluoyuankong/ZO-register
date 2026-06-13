@@ -411,10 +411,14 @@ async function main() {
       if (attempt <= 2 || attempt % 3 === 0) await clickTurnstile(page, widget);
       for (let w = 0; w < 6; w++) {
         await sleep(2000);
-        const t = await page.evaluate(() => { try { return turnstile.getResponse(); } catch (e) { return null; } });
-        if (t && t.length > 10) { log('✅ TOKEN!'); tsPassed = true; break; }
-        const tx = await page.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
-        if (/complete signup|hi.*zo|set up/i.test(tx)) { tsPassed = true; break; }
+        try {
+          const h = (() => { try { return new URL(page.url()).hostname; } catch (e) { return ''; } })();
+          if (h.endsWith('.zo.computer') && h !== 'www.zo.computer') { tsPassed = true; break; }
+          const t = await page.evaluate(() => { try { return turnstile.getResponse(); } catch (e) { return null; } });
+          if (t && t.length > 10) { log('✅ TOKEN!'); tsPassed = true; break; }
+          const tx = await page.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+          if (/complete signup|hi.*zo|set up/i.test(tx)) { tsPassed = true; break; }
+        } catch (e) { tsPassed = true; break; }
       }
     } else if (token) {
       // token存在但widget不可见

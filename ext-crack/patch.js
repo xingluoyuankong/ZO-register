@@ -109,4 +109,60 @@
   } catch(e) {}
 
   console.log('[ExtCrack] ✅ all patches active');
+
+  // ===== 8. navigator.userAgentData (Cloudflare强制检查!) =====
+  try {
+    if (navigator.userAgentData) {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: function(){
+          return {
+            brands: [{brand:'Google Chrome',version:'131'},{brand:'Chromium',version:'131'},{brand:'Not_A Brand',version:'24'}],
+            mobile: false,
+            platform: 'Windows',
+            getHighEntropyValues: async function(hints) {
+              var r = { platform:'Windows', platformVersion:'10.0.0', architecture:'x86', model:'', uaFullVersion:'131.0.6778.265', bitness:'64', fullVersionList:[{brand:'Google Chrome',version:'131.0.6778.265'},{brand:'Chromium',version:'131.0.6778.265'},{brand:'Not_A Brand',version:'24.0.0.0'}] };
+              return r;
+            },
+            toJSON: function(){ return {brands:this.brands,mobile:this.mobile,platform:this.platform}; }
+          };
+        },
+        configurable: true
+      });
+    }
+  } catch(e) {}
+
+  // ===== 9. hardwareConcurrency =====
+  try {
+    var cores = [8,12,16,10,6][Math.floor(Math.random()*5)];
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: function(){ return cores; }, configurable: true });
+  } catch(e) {}
+
+  // ===== 10. deviceMemory =====
+  try {
+    var mems = [8,16,8,16,32,4,8][Math.floor(Math.random()*7)];
+    Object.defineProperty(navigator, 'deviceMemory', { get: function(){ return mems; }, configurable: true });
+  } catch(e) {}
+
+  // ===== 11. screen properties =====
+  try {
+    Object.defineProperty(screen, 'colorDepth', { get: function(){ return 24; }, configurable: true });
+    Object.defineProperty(screen, 'pixelDepth', { get: function(){ return 24; }, configurable: true });
+  } catch(e) {}
+
+  // ===== 12. Canvas fingerprint noise =====
+  try {
+    var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function() {
+      var ctx = this.getContext('2d', {willReadFrequently:true});
+      if (ctx) {
+        var d = ctx.getImageData(0,0,1,1);
+        if (d && d.data && d.data[3] !== undefined) {
+          d.data[Math.floor(Math.random()*4)] = (d.data[Math.floor(Math.random()*4)] || 0) + (Math.random() > 0.5 ? 1 : -1);
+        }
+      }
+      return origToDataURL.apply(this, arguments);
+    };
+  } catch(e) {}
+
+  console.log('[ExtCrack] ✅ fingerprint patches active');
 })();
