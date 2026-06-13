@@ -13,7 +13,6 @@ const EXT_DIR = join(__dirname, 'ext-crack');
 const LOG_DIR = join(__dirname, 'logs', 'oneshot');
 const EMAIL_DIR = 'C:\\Users\\XZXyuan\\Downloads\\批量注册邮箱\\已经使用';
 const ACCOUNTS_FILE = join(__dirname, 'keepalive', 'accounts.json');
-const PUPPET_FILE = join(__dirname, 'keepalive_full_puppet.js');
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -70,11 +69,6 @@ async function main() {
   const emailData = getEmail();
   if (!emailData) { log('无邮箱'); process.exit(1); }
   log(`邮箱: ${emailData.email}`);
-
-  // 读取保活脚本
-  let puppetB64;
-  try { puppetB64 = readFileSync(PUPPET_FILE, 'utf-8').split('\n').map(l => l.trimEnd()).join('\n'); } catch(e) { log('保活脚本读取失败'); process.exit(1); }
-  puppetB64 = Buffer.from(puppetB64).toString('base64');
 
   // ===== 阶段1: 获取magic link =====
   const { chromium } = await import('playwright');
@@ -192,19 +186,8 @@ async function main() {
   await sendCmd('sudo apt install -y nodejs npm 2>&1 | tail -5', '安装nodejs');
   await sendCmd('npm install -g playwright 2>&1 | tail -5 && npx playwright install chromium 2>&1 | tail -5', '安装playwright');
 
-  // base64写入保活脚本
-  const chunkSize = 500;
-  const b64 = puppetB64;
-  const parts = [];
-  for (let i = 0; i < b64.length; i += chunkSize) parts.push(b64.substring(i, i + chunkSize));
-
-  // 先清空文件
-  await sendCmd('echo -n "" > /home/user/puppet.b64', '清空');
-  // 分片追加
-  for (let i = 0; i < parts.length; i++) {
-    await sendCmd(`echo -n "${parts[i]}" >> /home/user/puppet.b64`, `写入分片${i + 1}/${parts.length}`);
-  }
-  await sendCmd('base64 -d /home/user/puppet.b64 > /home/user/keepalive.js && echo "SCRIPT_OK"', '解码脚本');
+  // ★ curl直接下载保活脚本（3秒搞定，不是2小时）
+  await sendCmd('curl -fsSL -o /home/user/keepalive.js https://raw.githubusercontent.com/xingluoyuankong/ZO-register/master/keepalive_full_puppet.js && echo "DOWNLOADED"', '下载保活脚本');
 
   // 启动
   await sendCmd('cd /home/user && nohup xvfb-run -a node keepalive.js > /tmp/keepalive.log 2>&1 & echo "PID=$!"', '启动保活');
