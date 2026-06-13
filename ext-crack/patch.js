@@ -109,4 +109,31 @@
   } catch(e) {}
 
   console.log('[ExtCrack] ✅ all patches active');
+
+  // === 8. navigator.userAgentData (2026 Cloudflare头号检测向量) ===
+  try {
+    Object.defineProperty(navigator, 'userAgentData', {
+      get: function(){
+        var brands = [{brand:'Google Chrome',version:'131'},{brand:'Chromium',version:'131'},{brand:'Not_A Brand',version:'24'}];
+        return {
+          brands: brands, mobile: false, platform: 'Windows',
+          getHighEntropyValues: async function(){ return { platform:'Windows', platformVersion:'10.0.0', architecture:'x86', uaFullVersion:'131.0.6778.265', bitness:'64' }; },
+          toJSON: function(){ return {brands:brands,mobile:false,platform:'Windows'}; }
+        };
+      }, configurable: true
+    });
+  } catch(e) {}
+
+  // === 9. hardwareConcurrency ===
+  try {
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: function(){ return 8; }, configurable: true
+    });
+  } catch(e) {}
+
+  // === 10. Canvas noise ===
+  try {
+    var _td = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(){var c=this.getContext('2d');if(c){var d=c.getImageData(0,0,1,1);if(d&&d.data){d.data[0]=d.data[0]^(Math.random()>.5?1:0);}}return _td.apply(this,arguments);};
+  } catch(e) {}
 })();
