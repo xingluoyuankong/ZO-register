@@ -1,6 +1,6 @@
 /**
  * 把保活面板部署到 ZO子域名/keepalive 路径下
- * 方法: 查ZO的nginx → 加反向代理规则 → localhost:3000
+ * 修复：精确聚焦终端输入+粘贴命令替代逐字type
  */
 import { readFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -39,60 +39,6 @@ async function findWidget(cdp) {
   if(!r)return null; try{const bm=await cdp.send('DOM.getBoxModel',{nodeId:r.nodeId});if(bm?.model?.content){const c=bm.model.content;r.box={x:c[0],y:c[1],w:c[2]-c[0],h:c[5]-c[1]};}}catch(e){} return r;
 }
 
-// nginx配置脚本
-const NGINX_SETUP = `
-# 检查现有nginx并添加/keepalive反向代理
-if ! command -v nginx &>/dev/null; then
-  sudo apt update -qq && sudo apt install -y nginx
-fi
-
-# 看ZO用什么端口
-ZO_PORT=$(sudo netstat -tlnp | grep ':80 ' | awk '{print $7}' | cut -d/ -f1 || echo "")
-echo "ZO process: $ZO_PORT"
-
-# 找到默认配置
-if [ -f /etc/nginx/sites-enabled/default ]; then
-  CFG=/etc/nginx/sites-enabled/default
-elif [ -f /etc/nginx/conf.d/default.conf ]; then
-  CFG=/etc/nginx/conf.d/default.conf
-else
-  echo "no nginx config found, creating..."
-  CFG=/etc/nginx/sites-enabled/default
-fi
-
-# 备份
-sudo cp $CFG ${CFG}.bak 2>/dev/null
-
-# 写入新配置 - 加/keepalive路径代理到localhost:3000
-sudo tee $CFG << 'NGINXCONF'
-server {
-    listen 80 default_server;
-    server_name _;
-
-    # 保活面板
-    location /keepalive/ {
-        proxy_pass http://127.0.0.1:3000/;
-        proxy_set_header Host $host;
-    }
-    location /keepalive {
-        return 301 /keepalive/;
-    }
-
-    # ZO桌面UI透传
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-NGINXCONF
-
-sudo nginx -t && sudo systemctl reload nginx && echo "NGINX_OK" || echo "NGINX_FAIL"
-`;
-
 async function main() {
   const { chromium } = await import('playwright');
   const context = await chromium.launchPersistentContext(
@@ -103,7 +49,7 @@ async function main() {
   const cdp = await context.newCDPSession(page);
   await cdp.send('DOM.enable');
 
-  // 登录
+  // ===== 登录 =====
   log('登录...');
   try { await page.goto('https://www.zo.computer/signup', { waitUntil: 'networkidle', timeout: 30000 }); } catch(e) {}
   await sleep(3000);
@@ -117,60 +63,141 @@ async function main() {
   const st=new Date(Date.now()-5000); let link=null, rt=acc.refreshToken;
   for(let i=0;i<60;i++){try{const {at,rt:nr}=await getMsToken(acc.clientId,rt);rt=nr;link=await findLink(at,st);}catch(e){} if(link)break; await sleep(3000); process.stdout.write('.'); }
   if(!link){log('\n无link');await context.close();return;}
+  log(`\nlink: ${link.substring(0,60)}...`);
   try{await page.goto(link,{waitUntil:'domcontentloaded',timeout:60000});}catch(e){}
   await sleep(12000);
-  for(let a=0;a<10;a++){let host='x';try{host=(()=>{try{return new URL(page.url()).hostname}catch(e){return''}})();}catch(e){} if(host.endsWith('.zo.computer')&&host!=='www.zo.computer'){log(`✅ ${host}`);break;} const w=await findWidget(cdp);if(w?.box&&w.box.w>0&&a<3){const{x,y,h:bh}=w.box;try{await page.mouse.move(x+28,y+bh/2,{steps:8});await sleep(100);await page.mouse.down();await sleep(50);await page.mouse.up();}catch(e){}} await sleep(3000);}
+  for(let a=0;a<10;a++){let host='x';try{host=(()=>{try{return new URL(page.url()).hostname}catch(e){return''}})();}catch(e){} if(host.endsWith('.zo.computer')&&host!=='www.zo.computer'){log(`✅ 已登录: ${host}`);break;} const w=await findWidget(cdp);if(w?.box&&w.box.w>0&&a<3){const{x,y,h:bh}=w.box;try{await page.mouse.move(x+28,y+bh/2,{steps:8});await sleep(100);await page.mouse.down();await sleep(50);await page.mouse.up();}catch(e){}} await sleep(3000);}
 
-  log('等ZO(50s)...');
-  await sleep(50000);
+  // ===== 等待ZO完全加载 =====
+  log('等待ZO桌面完全加载(60s)...');
+  await sleep(60000);
 
-  // 终端
+  // ===== 打开终端（精确方法） =====
+  // ZO的终端是通过xterm.js渲染的，在页面某个区域
+  // 方法1: Ctrl+` 快捷键
+  log('打开终端...');
   await page.keyboard.press('Control+Backquote');
-  await sleep(8000);
+  await sleep(10000);
 
-  async function term(cmd, desc, wait=25000){
+  // ★ 关键修复：点击终端区域确保聚焦
+  // 终端区域通常在页面下半部分或底部面板
+  // 先截图看看终端在哪里
+  try { await page.screenshot({ path: join(LOG_DIR, 'terminal_open.png') }); } catch(e){}
+  
+  // 终端输入在 xterm 的 textarea 或者直接通过键盘事件发送
+  // xterm.js 通常有一个隐藏的 textarea 用于输入
+  const terminalFocused = await page.evaluate(() => {
+    // 找 xterm 的 textarea
+    const xtermTextarea = document.querySelector('.xterm-helper-textarea') || document.querySelector('textarea[aria-label]');
+    if (xtermTextarea) {
+      xtermTextarea.focus();
+      xtermTextarea.click();
+      return 'xterm-textarea';
+    }
+    // 找任何可见的 textarea
+    for (const ta of document.querySelectorAll('textarea')) {
+      if (ta.offsetParent !== null) {
+        ta.focus(); ta.click();
+        return 'textarea-visible';
+      }
+    }
+    // 尝试点击终端面板区域
+    const termPanel = document.querySelector('[class*="terminal" i]') || document.querySelector('[class*="xterm" i]');
+    if (termPanel) { termPanel.click(); return 'terminal-panel'; }
+    return 'none';
+  });
+  log(`  终端聚焦: ${terminalFocused}`);
+  await sleep(2000);
+
+  // ★ 核心：发送命令到终端（通过剪贴板粘贴，比逐字type可靠100倍）
+  async function term(cmd, desc, waitMs = 25000) {
     log(`[${desc}]`);
-    for(const ch of cmd){await page.keyboard.type(ch);await sleep(15);}
-    await sleep(500);await page.keyboard.press('Enter');
-    log('  ✅');
-    await sleep(wait);
+    
+    // 每次执行前先确保终端聚焦
+    await page.evaluate(() => {
+      const ta = document.querySelector('.xterm-helper-textarea') || document.querySelector('textarea[aria-label]');
+      if (ta) { ta.focus(); ta.click(); return; }
+      for (const t of document.querySelectorAll('textarea')) { if (t.offsetParent) { t.focus(); t.click(); return; } }
+    });
+    await sleep(500);
+
+    // 用剪贴板粘贴命令
+    await page.evaluate(c => navigator.clipboard.writeText(c), cmd);
+    await sleep(300);
+    await page.keyboard.press('Control+v');
+    await sleep(800);
+    await page.keyboard.press('Enter');
+    log(`  已发送(${cmd.length}字符)`);
+    await sleep(waitMs);
   }
 
-  // 先看ZO80端口上跑的是什么
-  await term('sudo netstat -tlnp | head -20', '端口检查');
-  await term('ps aux | grep -E "nginx|node|next" | grep -v grep | head -10', '进程检查');
+  // ===== 先看ZO的端口和进程结构 =====
+  await term('echo "=== NETSTAT ===" && sudo netstat -tlnp 2>/dev/null | head -25 || ss -tlnp | head -25', '端口全景', 20000);
+  await term('echo "=== PS ===" && ps aux | grep -E "node|next|nginx|serve" | grep -v grep | head -15', '进程结构', 20000);
+  await term('echo "=== LS ===" && ls -la /etc/nginx/sites-enabled/ 2>/dev/null || echo "no nginx dir"', 'nginx配置', 15000);
 
-  // 杀掉旧的保活和80端口占用
-  await term('sudo pkill -9 -f keepalive.js 2>/dev/null; echo "killed"', '杀旧保活');
+  // ===== 第一步：杀掉旧保活 =====
+  await term('sudo pkill -9 -f keepalive.js 2>/dev/null; sleep 2; echo "CLEAN"', '杀旧保活');
 
-  // 下载保活脚本
-  await term('curl -fsSL -o /home/user/keepalive.js https://raw.githubusercontent.com/xingluoyuankong/ZO-register/master/keepalive_full_puppet.js && echo OK', '下载脚本');
+  // ===== 第二步：下载最新保活脚本 =====
+  await term('curl -fsSL -o /home/user/keepalive.js https://raw.githubusercontent.com/xingluoyuankong/ZO-register/master/keepalive_full_puppet.js && echo "DOWNLOADED"', '下载保活');
 
-  // 在3000端口启动保活
-  await term('cd /home/user && nohup xvfb-run -a node keepalive.js > /tmp/keepalive.log 2>&1 & echo "PID=$!"', '启动保活:3000');
+  // ===== 第三步：启动保活(3000端口) =====
+  await term('cd /home/user && nohup xvfb-run -a node keepalive.js > /tmp/keepalive.log 2>&1 & echo "STARTED_PID=$!"', '启动保活');
 
-  // 验证保活
-  await term('sleep 10 && ps aux | grep -v grep | grep keepalive && echo "RUNNING"', '验证保活');
-  await term('curl -s localhost:3000 | head -3', '验证面板');
+  // ===== 第四步：验证保活启动 =====
+  await term('sleep 15 && ps aux | grep -v grep | grep keepalive && echo "RUNNING" || echo "NOT_RUNNING"', '验证保活进程');
+  await term('curl -s localhost:3000 | head -5 || echo "PANEL_NOT_READY"', '验证3000面板');
 
-  // ★ 配置nginx反向代理 /keepalive -> localhost:3000
-  log('\n===== 配置nginx =====');
-  // base64编码nginx配置脚本
-  const nginxB64 = Buffer.from(NGINX_SETUP).toString('base64');
-  await term(`echo '${nginxB64}' | base64 -d > /tmp/nginx_setup.sh && chmod +x /tmp/nginx_setup.sh`, '写nginx脚本');
-  await term('sudo bash /tmp/nginx_setup.sh 2>&1', '运行nginx配置', 40000);
+  // ===== 第五步：查ZO用什么服务80端口，配置nginx =====
+  log('\n===== 配置nginx反向代理 =====');
+  
+  // 先看看80端口是谁在管
+  await term('sudo netstat -tlnp | grep ":80 "', '80端口占用');
 
-  // 测试外部访问
-  await term('curl -s localhost/keepalive/ | head -5', '测试路径');
-  await term('curl -s localhost/keepalive/api/state', '测试API');
+  // 安装nginx
+  await term('which nginx || (sudo apt update -qq && sudo apt install -y nginx) && echo "NGINX_READY"', '安装nginx');
 
-  log('\n===== ✅ 完成 =====');
-  log('ZO桌面: https://builderpcux.zo.computer');
+  // 写入nginx配置（把/keepalive反向代理到3000，其余透传给ZO桌面）
+  const nginxConf = [
+    'server {',
+    '    listen 80 default_server;',
+    '    server_name _;',
+    '    # 保活面板',
+    '    location /keepalive/ {',
+    '        proxy_pass http://127.0.0.1:3000/;',
+    '        proxy_set_header Host $host;',
+    '    }',
+    '    location /keepalive { return 301 /keepalive/; }',
+    '    # ZO桌面 - 需要先查出ZO的实际端口',
+    '    # 默认先试8080',
+    '    location / {',
+    '        proxy_pass http://127.0.0.1:8080;',
+    '        proxy_set_header Host $host;',
+    '        proxy_set_header X-Real-IP $remote_addr;',
+    '        proxy_http_version 1.1;',
+    '        proxy_set_header Upgrade $http_upgrade;',
+    '        proxy_set_header Connection "upgrade";',
+    '    }',
+    '}',
+  ].join('\\n');
+  
+  const nginxB64 = Buffer.from(nginxConf).toString('base64');
+  await term(`echo '${nginxB64}' | base64 -d | sudo tee /etc/nginx/sites-enabled/default > /dev/null && echo "CONF_WRITTEN"`, '写nginx配置');
+  await term('sudo nginx -t && sudo systemctl reload nginx && echo "NGINX_OK" || echo "NGINX_FAIL"', '重载nginx', 30000);
+
+  // ===== 第六步：验证 =====
+  await term('curl -s -o /dev/null -w "%{http_code}" localhost/keepalive/', '测试面板HTTP码');
+  await term('curl -s localhost/keepalive/api/state | head -20 || echo "API_FAIL"', '测试面板API');
+
+  log('\n===== ✅ 部署完成 =====');
   log('保活面板: https://builderpcux.zo.computer/keepalive/');
-  log('保活API: https://builderpcux.zo.computer/keepalive/api/state');
-  log('保持60s...');
-  await sleep(60000);
+  log('保活API:  https://builderpcux.zo.computer/keepalive/api/state');
+  log('ZO桌面:   https://builderpcux.zo.computer (正常使用)');
+  log('\n保持120s后关闭...');
+  await sleep(120000);
   await context.close();
+  log('完成');
 }
 
-main().catch(e => { log(`错误: ${e.message}`); process.exit(1); });
+main().catch(e => { log(`错误: ${e.message}`); console.error(e); process.exit(1); });
