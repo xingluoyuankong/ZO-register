@@ -49,24 +49,40 @@ async function main() {
   const cdp = await context.newCDPSession(page);
   await cdp.send('DOM.enable');
 
-  // ===== 登录 =====
-  log('登录...');
-  try { await page.goto('https://www.zo.computer/signup', { waitUntil: 'networkidle', timeout: 30000 }); } catch(e) {}
-  await sleep(3000);
-  await seval(page, () => { for (const btn of document.querySelectorAll('button,a')) { if (/email/i.test(btn.textContent||'') && btn.offsetParent) { btn.click(); return; } } });
-  await sleep(2000);
-  await seval(page, e => { const inp=document.querySelector('input[type=email]')||document.querySelector('input'); if(inp){ const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; s.call(inp,e); inp.dispatchEvent(new Event('input',{bubbles:true})); } }, acc.email);
-  await sleep(500);
-  await seval(page, () => { for(const btn of document.querySelectorAll('button')){ if(/continue/i.test(btn.textContent||'')){ btn.click();return; } } });
-  await sleep(3000);
+  // ===== 登录（用持久化session，不用重新发magic link） =====
+  log('直接用持久化session登录...');
+  
+  // 直接打开ZO子域名，session cookie可能还在
+  const zoDomain = acc.handle ? `https://${acc.handle}.zo.computer` : 'https://www.zo.computer';
+  log(`打开: ${zoDomain}`);
+  try { await page.goto(zoDomain, { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch(e) { log(`直接访问失败: ${e.message}`); }
+  await sleep(8000);
+  
+  let host = 'x';
+  try { host = (() => { try { return new URL(page.url()).hostname; } catch(e) { return ''; } })(); } catch(e) {}
+  
+  if (host.endsWith('.zo.computer') && host !== 'www.zo.computer') {
+    log(`✅ Session有效: ${host}`);
+  } else {
+    log(`需要重新登录(当前: ${host})，发magic link...`);
+    try { await page.goto('https://www.zo.computer/signup', { waitUntil: 'networkidle', timeout: 30000 }); } catch(e) {}
+    await sleep(3000);
+    await seval(page, () => { for (const btn of document.querySelectorAll('button,a')) { if (/email/i.test(btn.textContent||'') && btn.offsetParent) { btn.click(); return; } } });
+    await sleep(2000);
+    await seval(page, e => { const inp=document.querySelector('input[type=email]')||document.querySelector('input'); if(inp){ const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; s.call(inp,e); inp.dispatchEvent(new Event('input',{bubbles:true})); } }, acc.email);
+    await sleep(500);
+    await seval(page, () => { for(const btn of document.querySelectorAll('button')){ if(/continue/i.test(btn.textContent||'')){ btn.click();return; } } });
+    await sleep(3000);
 
-  const st=new Date(Date.now()-5000); let link=null, rt=acc.refreshToken;
-  for(let i=0;i<60;i++){try{const {at,rt:nr}=await getMsToken(acc.clientId,rt);rt=nr;link=await findLink(at,st);}catch(e){} if(link)break; await sleep(3000); process.stdout.write('.'); }
-  if(!link){log('\n无link');await context.close();return;}
-  log(`\nlink: ${link.substring(0,60)}...`);
-  try{await page.goto(link,{waitUntil:'domcontentloaded',timeout:60000});}catch(e){}
-  await sleep(12000);
-  for(let a=0;a<10;a++){let host='x';try{host=(()=>{try{return new URL(page.url()).hostname}catch(e){return''}})();}catch(e){} if(host.endsWith('.zo.computer')&&host!=='www.zo.computer'){log(`✅ 已登录: ${host}`);break;} const w=await findWidget(cdp);if(w?.box&&w.box.w>0&&a<3){const{x,y,h:bh}=w.box;try{await page.mouse.move(x+28,y+bh/2,{steps:8});await sleep(100);await page.mouse.down();await sleep(50);await page.mouse.up();}catch(e){}} await sleep(3000);}
+    const st=new Date(Date.now()-5000); let link=null, rt=acc.refreshToken;
+    for(let i=0;i<45;i++){try{const {at,rt:nr}=await getMsToken(acc.clientId,rt);rt=nr;link=await findLink(at,st);}catch(e){} if(link)break; await sleep(4000); process.stdout.write('.'); }
+    if(!link){log('\n无link，尝试用备用方法...');} else {
+      log(`\nlink: ${link.substring(0,60)}...`);
+      try{await page.goto(link,{waitUntil:'domcontentloaded',timeout:60000});}catch(e){}
+      await sleep(12000);
+      for(let a=0;a<10;a++){let h2='x';try{h2=(()=>{try{return new URL(page.url()).hostname}catch(e){return''}})();}catch(e){} if(h2.endsWith('.zo.computer')&&h2!=='www.zo.computer'){log(`✅ 已登录: ${h2}`);break;} const w=await findWidget(cdp);if(w?.box&&w.box.w>0&&a<3){const{x,y,h:bh}=w.box;try{await page.mouse.move(x+28,y+bh/2,{steps:8});await sleep(100);await page.mouse.down();await sleep(50);await page.mouse.up();}catch(e){}} await sleep(3000);}
+    }
+  }
 
   // ===== 等待ZO完全加载 =====
   log('等待ZO桌面完全加载(60s)...');
