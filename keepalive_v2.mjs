@@ -217,27 +217,54 @@ async function doLogin(page, cdp, account) {
 async function activeKeepalive(page) {
   log(`\n💬 [活跃保活] 模拟用户操作...`);
 
+  // 等待页面充分加载（ZO是React SPA）
+  await sleep(rand(3000, 6000));
+
   const text = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
   const url = page.url();
 
-  // 检测ZO AI输入框
-  const hasInput = /send a message|type a message|ask zo|ask anything|message zo|send message|textarea/i.test(text);
+  // 检测ZO AI输入框（多种可能的选择器）
+  const inputFound = await page.evaluate(() => {
+    const selectors = [
+      'textarea', '[contenteditable="true"]', '[role="textbox"]',
+      '[data-testid="chat-input"]', '[class*="chat"] textarea',
+      '[class*="message"] textarea', '[placeholder*="message" i]',
+      '[placeholder*="ask" i]', '[placeholder*="type" i]',
+      '.ProseMirror', '[contenteditable]', 'input[type="text"]'
+    ];
+    for (const sel of selectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) return sel;
+      } catch(e) {}
+    }
+    return null;
+  });
 
-  if (hasInput || /dashboard|desktop|explore|zo space/i.test(text)) {
+  log(`  页面: ${text.substring(0, 80) || '(动态渲染中)'}`);
+  log(`  输入框: ${inputFound || '未找到'}`);
+
+  if (inputFound || /dashboard|desktop|explore|chat/i.test(text) || !text) {
     // ★ 发送AI消息（模拟活跃使用）
     const question = pick(ACTIVE_QUESTIONS);
     log(`  发送消息: "${question}"`);
 
-    // 找输入框
-    const typed = await page.evaluate(() => {
-      for (const el of document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"], [role="textbox"]')) {
-        if (el.offsetParent !== null) {
-          el.focus();
-          return true;
+    // 用找到的选择器聚焦输入框
+    let typed = false;
+    if (inputFound) {
+      typed = await page.evaluate(sel => {
+        try { const el = document.querySelector(sel); if (el) { el.focus(); el.click(); return true; } } catch(e) {}
+        return false;
+      }, inputFound);
+    }
+    if (!typed) {
+      typed = await page.evaluate(() => {
+        for (const el of document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"], [role="textbox"]')) {
+          if (el.offsetParent !== null) { el.focus(); el.click(); return true; }
         }
-      }
-      return false;
-    });
+        return false;
+      });
+    }
 
     if (typed) {
       // 拟人输入
