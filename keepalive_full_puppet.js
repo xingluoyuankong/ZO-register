@@ -14,7 +14,7 @@ const fs = require('fs');
 
 const LOG_FILE = '/tmp/keepalive.log';
 const STATE_FILE = '/tmp/keepalive_state.json';
-const PANEL_PORT = 80;
+const PANEL_PORT = 3000; // ZO内部访问，不占用80端口(ZO桌面)
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const BASE_INTERVAL = 5 * 60 * 1000;
 const JITTER = 7 * 60 * 1000;
