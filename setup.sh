@@ -42,12 +42,15 @@ fi
 
 # 7. 测试面板
 echo "[6/6] 测试面板..."
-sleep 3
-curl -s -o /dev/null -w "  HTTP Status: %{http_code}\n" localhost:3000/ || echo "  Panel not ready yet"
-curl -s localhost:3000/api/state 2>/dev/null | head -20 || echo "  API not ready"
+sleep 5
+curl -s -o /dev/null -w "  Panel HTTP: %{http_code}\n" localhost:3000/ || echo "  Panel not ready"
+curl -s localhost:3000/api/state 2>/dev/null | head -5 || echo "  API not ready"
 
 echo ""
 echo "=== SETUP DONE ==="
-echo "Panel:  curl localhost:3000"
-echo "API:    curl localhost:3000/api/state"
-echo "Log:    cat /tmp/keepalive.log"
+echo "ZO终端查看: curl localhost:3000"
+echo "ZO终端API:  curl localhost:3000/api/state"
+echo "心跳日志:   cat /tmp/keepalive.log"
+echo ""
+echo "保活策略: 每5-12分钟随机周期"
+echo "  AI提问(60%) 新会话(25%) 鼠标(80%) 滚动(70%) 点击(45%)"
