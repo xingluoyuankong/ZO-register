@@ -115,8 +115,8 @@ async function login(page, cdp, acc) {
 
     const widget = await findWidget(cdp);
     if (widget?.box && widget.box.w > 0 && a < 3) {
-      const { x, y, w, wh } = widget.box;
-      await page.mouse.move(x + 28, y + wh / 2, { steps: 8 });
+      const { x, y, h } = widget.box;
+      await page.mouse.move(x + 28, y + h / 2, { steps: 8 });
       await sleep(100); await page.mouse.down(); await sleep(50); await page.mouse.up();
       await sleep(3000);
     }
