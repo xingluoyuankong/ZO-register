@@ -216,6 +216,64 @@ async function pollMagicLink(email, clientId, refreshToken, afterTime, log, conf
 }
 
 // ========== Safe Page Helpers ==========
+// Click a button matching the given regex — uses forceClick with proper mouse events
+// ★ Puppeteer native click by visible text — uses CDP Input.dispatchMouseEvent (real mouse events)
+// NO page.evaluate el.click() — that's synthetic JS click which React ignores
+async function realClickByText(page, pattern) {
+  // ★ Split on | FIRST, then clean each keyword individually
+  const rawSource = pattern.source;
+  const rawKeywords = rawSource.split(/\s*\|\s*/);
+  const keywords = rawKeywords.map(k =>
+    k.replace(/\\s\*/g, ' ').replace(/\\s\+/g, ' ').replace(/[.*+?^${}()\[\]\\]/g, '').trim()
+  ).filter(k => k.length > 0);
+  for (const kw of keywords) {
+    const cleanKw = kw.replace(/\\s/g, ' ').trim();
+    if (!cleanKw) continue;
+    const xpathExpr = `//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${cleanKw.toLowerCase()}')]|//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${cleanKw.toLowerCase()}')]|//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${cleanKw.toLowerCase()}')]`;
+    let elements;
+    try { elements = await page.$x(xpathExpr); } catch(e) { continue; }
+    for (const el of elements) {
+      try {
+        const box = await el.boundingBox();
+        if (!box || box.width <= 0 || box.height <= 0) continue;
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        await page.mouse.move(x, y);
+        await new Promise(r => setTimeout(r, 80));
+        await page.mouse.click(x, y);
+        await el.dispose();
+        return true;
+      } catch(e) {
+        try { await el.dispose(); } catch(e2) {}
+      }
+    }
+  }
+  // Last resort: find via evaluate, get coords, click with page.mouse
+  try {
+    const coords = await page.evaluate((kwList) => {
+      for (const kw of kwList) {
+        const re = new RegExp(kw, 'i');
+        for (const sel of ['button', 'a', 'div[role=button]']) {
+          for (const el of document.querySelectorAll(sel)) {
+            if (!re.test((el.textContent || '').trim())) continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          }
+        }
+      }
+      return null;
+    }, keywords);
+    if (coords) {
+      await page.mouse.move(coords.x, coords.y);
+      await new Promise(r => setTimeout(r, 80));
+      await page.mouse.click(coords.x, coords.y);
+      return true;
+    }
+  } catch(e) {}
+  return false;
+}
+
 async function getBodyText(page, len) {
   len = len || 500;
   try { return await page.evaluate((l) => document.body.innerText.substring(0, l), len); } catch (e) { return ""; }
@@ -233,91 +291,177 @@ async function waitForText(page, regex, timeoutMs) {
 }
 
 // ========== Fetch Access Token ==========
-async function fetchAccessToken(page, config, log) {
+// ★ ALL interactions use CDP native control: page.mouse.click, page.keyboard.type/press
+// ★ NO page.evaluate el.click() — React/synthetic clicks ignored
+async function fetchAccessToken(page, handle, config, log) {
   log("[TOKEN] Starting Access Token retrieval...");
-  const currentUrl = page.url();
-  const zoBase = currentUrl.match(/https?:\/\/[^\/]+/)?.[0] || "";
-  const settingsUrls = [
-    zoBase + "/settings",
-    zoBase + "/setting",
-    "https://www.zo.computer/settings",
-  ];
 
-  // Step T1: Navigate to settings page
-  log("[TOKEN] Looking for settings page...");
   let settingsLoaded = false;
+
+  // Strategy A: Try URL patterns
+  const settingsUrls = [
+    "https://" + handle + ".zo.computer/settings",
+    "https://" + handle + ".zo.computer/settings/advanced",
+    "https://www.zo.computer/settings",
+    "https://www.zo.computer/account/settings",
+    "https://www.zo.computer/dashboard/settings",
+    "https://app.zo.computer/settings",
+  ];
   for (const sUrl of settingsUrls) {
     try {
-      log("[TOKEN] Trying: " + sUrl);
-      await page.goto(sUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      log("[TOKEN] Trying URL: " + sUrl);
+      await page.goto(sUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
       await new Promise(r => setTimeout(r, 3000));
       const txt = await getBodyText(page, 800);
-      // Check if we reached a settings page (look for settings-like content)
-      if (/setting|advanced|profile|account|general/i.test(txt)) {
-        log("[TOKEN] Settings page loaded!");
+      if (/setting|advanced|profile|account|general|token|api.?key/i.test(txt)) {
+        log("[TOKEN] ✅ Settings page loaded via URL!");
         settingsLoaded = true;
         break;
       }
+      log("[TOKEN] Page text: " + txt.substring(0, 120).replace(/\n/g, " | "));
     } catch (e) {
       log("[TOKEN] Nav error: " + e.message.substring(0, 50));
     }
   }
 
-  // Fallback: try clicking settings gear/icon in UI
+  // Strategy B: Go to dashboard, click user profile to open menu → Settings
   if (!settingsLoaded) {
-    log("[TOKEN] Trying to find settings link in UI...");
-    const clicked = await page.evaluate(() => {
-      // Look for settings gear icon or settings link
-      for (const el of document.querySelectorAll('a, button, [role="button"], [aria-label*="settings" i], [aria-label*="Settings"]')) {
-        const txt = (el.textContent || "").trim();
-        const ariaLabel = (el.getAttribute("aria-label") || "").trim();
-        const href = el.getAttribute("href") || "";
-        if (/setting/i.test(txt) || /setting/i.test(ariaLabel) || /setting/i.test(href)) {
-          el.click();
-          return true;
+    log("[TOKEN] Going to dashboard to find settings via UI...");
+    try {
+      await page.goto("https://" + handle + ".zo.computer/", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await new Promise(r => setTimeout(r, 5000));
+    } catch(e) {
+      log("[TOKEN] Dashboard nav error: " + e.message.substring(0, 50));
+    }
+
+    // Log all visible links/buttons for debugging
+    const uiElements = await page.evaluate(() => {
+      const items = [];
+      for (const a of document.querySelectorAll('a[href], button, [role="button"]')) {
+        const txt = (a.textContent || "").trim().substring(0, 60);
+        const href = a.getAttribute("href") || "";
+        const aria = a.getAttribute("aria-label") || "";
+        const rect = a.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && (txt || aria)) {
+          items.push({ txt, href: href.substring(0, 80), aria, tag: a.tagName });
         }
       }
-      // Look for gear icon (⚙️ or SVG gear)
-      for (const el of document.querySelectorAll('[class*="gear"], [class*="setting"], svg[class*="cog"]')) {
-        el.click();
-        return true;
+      return items;
+    }).catch(() => []);
+    log("[TOKEN] Dashboard UI elements (" + uiElements.length + "):");
+    for (const el of uiElements.slice(0, 30)) {
+      log("  " + el.tag + " [" + (el.txt || el.aria) + "] href=" + el.href);
+    }
+
+    // ★ CDP click on user profile (handle text in nav bar)
+    log("[TOKEN] CDP click on user profile element...");
+    const profileClicked = await realClickByText(page, new RegExp(handle, 'i'));
+    if (!profileClicked) {
+      log("[TOKEN] Handle text not found as button, trying avatar/profile icon...");
+      // Try clicking avatar or profile-related element by position
+      const avatarCoords = await page.evaluate(() => {
+        // Look for elements that might be user avatar/profile in top-right area
+        for (const sel of ['img', '[class*="avatar"]', '[class*="profile"]', '[class*="user"]', '[aria-label*="profile" i]', '[aria-label*="account" i]']) {
+          for (const el of document.querySelectorAll(sel)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.top < 100) { // top bar area
+              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }
+          }
+        }
+        return null;
+      }).catch(() => null);
+      if (avatarCoords) {
+        log("[TOKEN] CDP click avatar at (" + Math.round(avatarCoords.x) + "," + Math.round(avatarCoords.y) + ")");
+        await page.mouse.click(avatarCoords.x, avatarCoords.y);
       }
-      return false;
-    }).catch(() => false);
-    if (clicked) {
-      await new Promise(r => setTimeout(r, 3000));
-      const txt = await getBodyText(page, 600);
-      if (/setting|advanced|profile|account/i.test(txt)) {
-        settingsLoaded = true;
-        log("[TOKEN] Settings opened via UI click!");
+    }
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Check for dropdown menu
+    const menuTxt = await getBodyText(page, 1500);
+    log("[TOKEN] After profile click: " + menuTxt.substring(0, 200).replace(/\n/g, " | "));
+
+    if (/settings|setting/i.test(menuTxt)) {
+      log("[TOKEN] 'Settings' in menu — CDP click...");
+      const clicked = await realClickByText(page, /settings/i);
+      if (clicked) {
+        await new Promise(r => setTimeout(r, 3000));
+        const afterTxt = await getBodyText(page, 800);
+        if (/setting|advanced|profile|account|general/i.test(afterTxt)) {
+          settingsLoaded = true;
+          log("[TOKEN] ✅ Settings opened via menu!");
+        }
+      }
+    }
+
+    // Strategy C: Find settings link href
+    if (!settingsLoaded) {
+      log("[TOKEN] Scanning for settings href...");
+      const settingsHref = await page.evaluate(() => {
+        for (const a of document.querySelectorAll('a[href]')) {
+          const href = a.getAttribute("href") || "";
+          const txt = (a.textContent || "").trim();
+          if (/setting/i.test(href) || /setting/i.test(txt)) return a.href;
+        }
+        return null;
+      }).catch(() => null);
+      if (settingsHref) {
+        log("[TOKEN] Found href: " + settingsHref);
+        try {
+          await page.goto(settingsHref, { waitUntil: "domcontentloaded", timeout: 15000 });
+          await new Promise(r => setTimeout(r, 3000));
+          const txt = await getBodyText(page, 800);
+          if (/setting|advanced|profile|account/i.test(txt)) {
+            settingsLoaded = true;
+            log("[TOKEN] ✅ Settings loaded via href!");
+          }
+        } catch(e) {}
+      }
+    }
+
+    // Strategy D: Click gear/settings icon by coords
+    if (!settingsLoaded) {
+      log("[TOKEN] Trying gear/settings icon CDP click...");
+      const iconCoords = await page.evaluate(() => {
+        for (const sel of ['[aria-label*="setting" i]', '[aria-label*="Setting"]', '[class*="gear"]', '[class*="setting"]', '[class*="cog"]']) {
+          for (const el of document.querySelectorAll(sel)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }
+          }
+        }
+        return null;
+      }).catch(() => null);
+      if (iconCoords) {
+        log("[TOKEN] CDP click gear icon at (" + Math.round(iconCoords.x) + "," + Math.round(iconCoords.y) + ")");
+        await page.mouse.click(iconCoords.x, iconCoords.y);
+        await new Promise(r => setTimeout(r, 3000));
+        const txt = await getBodyText(page, 800);
+        if (/setting|advanced|profile|account/i.test(txt)) {
+          settingsLoaded = true;
+          log("[TOKEN] ✅ Settings via gear icon!");
+        }
       }
     }
   }
 
   if (!settingsLoaded) {
+    try {
+      const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_" + handle + ".png");
+      await page.screenshot({ path: ssPath, fullPage: false });
+      log("[TOKEN] Debug screenshot: " + ssPath);
+    } catch(e) {}
     log("[TOKEN] ⚠️ Could not find settings page, skipping token retrieval");
     return null;
   }
 
-  // Step T2: Click "Advanced" tab
-  log("[TOKEN] Clicking Advanced tab...");
+  // Step T2: Click "Advanced" tab — ★ CDP native click via realClickByText
+  log("[TOKEN] CDP clicking Advanced tab...");
   let advancedClicked = false;
-  for (let attempt = 0; attempt < 3 && !advancedClicked; attempt++) {
-    advancedClicked = await page.evaluate(() => {
-      const selectors = [
-        'a', 'button', '[role="tab"]', '[role="button"]', 'div[class*="tab"]', 'li', 'span'
-      ];
-      for (const sel of selectors) {
-        for (const el of document.querySelectorAll(sel)) {
-          const txt = (el.textContent || "").trim();
-          if (/^Advanced$/i.test(txt) || /高级/i.test(txt)) {
-            el.click();
-            return true;
-          }
-        }
-      }
-      return false;
-    }).catch(() => false);
+  for (let attempt = 0; attempt < 5 && !advancedClicked; attempt++) {
+    advancedClicked = await realClickByText(page, /advanced|高级/i);
     if (advancedClicked) {
       log("[TOKEN] Advanced tab clicked!");
       await new Promise(r => setTimeout(r, 3000));
@@ -325,108 +469,73 @@ async function fetchAccessToken(page, config, log) {
     }
     await new Promise(r => setTimeout(r, 2000));
   }
-
   if (!advancedClicked) {
-    log("[TOKEN] ⚠️ Could not find Advanced tab, trying to find token section directly...");
+    log("[TOKEN] ⚠️ Advanced tab not found, looking for token section directly...");
   }
-
-  // Step T3: Find "Key name" input in Personal Access Tokens section
-  log("[TOKEN] Looking for Access Token input...");
-  let tokenInput = null;
-  for (let i = 0; i < 15; i++) {
-    tokenInput = await page.evaluate(() => {
-      // Look for input near "Key name" or "Personal Access Token" text
-      const allInputs = document.querySelectorAll('input[type="text"], input:not([type])');
-      for (const inp of allInputs) {
-        const ph = (inp.placeholder || "").toLowerCase();
-        const ariaLabel = (inp.getAttribute("aria-label") || "").toLowerCase();
-        const name = (inp.name || "").toLowerCase();
-        // Check placeholder/aria-label
-        if (/key.?name|token.?name|api.?key|name/i.test(ph) || /key.?name|token.?name/i.test(ariaLabel)) {
-          return { found: true, selector: null };
-        }
-        // Check nearby label text
-        const parent = inp.closest('div, label, section, fieldset');
-        if (parent) {
-          const parentText = (parent.textContent || "").toLowerCase();
-          if (/key.?name|token.?name|personal.?access/i.test(parentText)) {
-            return { found: true, selector: null };
-          }
-        }
-      }
-      // Also check if the page has "Personal Access Tokens" section visible
-      const bodyText = document.body.innerText;
-      if (/personal.?access.?token|api.?token|key.?name/i.test(bodyText)) {
-        return { found: true, sectionVisible: true };
-      }
-      return { found: false };
-    }).catch(() => ({ found: false }));
-
-    if (tokenInput.found) break;
-    await new Promise(r => setTimeout(r, 2000));
-  }
-
-  // Step T4: Type key name into the input
-  const keyName = config.tokenKeyName || "API Access";
+  // Step T3-T4: Find and fill key name input — ★ CDP mouse.click + keyboard.type
+  const keyName = config.tokenKeyName || "MyApiKey";
   log("[TOKEN] Entering key name: " + keyName);
 
   let keyNameFilled = false;
-  // Try multiple approaches to find and fill the input
-  for (let attempt = 0; attempt < 5 && !keyNameFilled; attempt++) {
-    keyNameFilled = await page.evaluate((kn) => {
-      // Approach 1: Find input by placeholder
+  for (let attempt = 0; attempt < 8 && !keyNameFilled; attempt++) {
+    const inputCoords = await page.evaluate(() => {
       const allInputs = document.querySelectorAll('input[type="text"], input:not([type]), input[placeholder]');
       for (const inp of allInputs) {
         const ph = (inp.placeholder || "").toLowerCase();
         const ariaLabel = (inp.getAttribute("aria-label") || "").toLowerCase();
-        const name = (inp.name || "").toLowerCase();
-        const parent = inp.closest('div, label, section');
+        const parent = inp.closest('div, label, section, fieldset');
         const parentText = parent ? (parent.textContent || "").toLowerCase() : "";
-
-        if (/key.?name|token.?name|name|api|key/i.test(ph) ||
-            /key.?name|token.?name/i.test(ariaLabel) ||
-            /key.?name|token.?name|personal.?access/i.test(parentText)) {
-          // Use native setter to trigger React/Vue state updates
-          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-          inp.focus();
-          setter.call(inp, kn);
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
+        // ★ Only match Access Tokens input (ph="Key name (e.g..."), NOT Keys input (ph="KEY_NAME (or paste...)")
+        if (/key name \(e\.g/i.test(inp.placeholder || '') ||
+            /access.?token/i.test(parentText) && /key.?name/i.test(ph)) {
+          const rect = inp.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          }
         }
       }
+      return null;
+    }).catch(() => null);
 
-      // Approach 2: Find the first visible text input in the Advanced section
-      const advancedSection = document.querySelector('[class*="advanced"], [data-tab*="advanced"], section');
-      if (advancedSection) {
-        const inp = advancedSection.querySelector('input[type="text"], input:not([type])');
-        if (inp && inp.offsetParent !== null) {
-          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-          inp.focus();
-          setter.call(inp, kn);
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
-        }
-      }
-      return false;
-    }, keyName).catch(() => false);
+    if (inputCoords) {
+      // ★ CDP: click input → select all → type
+      await page.mouse.click(inputCoords.x, inputCoords.y);
+      await new Promise(r => setTimeout(r, 300));
+      await page.keyboard.down('Control');
+      await page.keyboard.press('a');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(keyName, { delay: 30 });
+      keyNameFilled = true;
+      log("[TOKEN] Key name filled via CDP click+type!");
+    }
 
     if (!keyNameFilled) {
-      // Try puppeteer-level input finding
+      // Fallback: find any visible text input near token-related text
       const inputs = await page.$$('input[type="text"], input:not([type="hidden"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"])');
       for (const inp of inputs) {
-        const ph = await inp.evaluate(e => (e.placeholder || "") + "|" + (e.getAttribute("aria-label") || "")).catch(() => "");
-        const parent = await inp.evaluate(e => {
+        const visible = await inp.evaluate(e => e.offsetParent !== null).catch(() => false);
+        if (!visible) continue;
+        const ph = await inp.evaluate(e => (e.placeholder || "")).catch(() => "");
+        const parentText = await inp.evaluate(e => {
           const p = e.closest('div, label, section');
-          return p ? p.textContent.substring(0, 100) : "";
+          return p ? p.textContent.substring(0, 100).toLowerCase() : "";
         }).catch(() => "");
-        if (/key.?name|token.?name|name|api/i.test(ph + "|" + parent)) {
-          await inp.click({ clickCount: 3 });
-          await new Promise(r => setTimeout(r, 200));
-          await inp.type(keyName, { delay: 30 });
-          keyNameFilled = true;
-          break;
+        if (/key name \(e\.g/i.test(ph) || (/access.?token/i.test(parentText) && /key.?name/i.test(ph))) {
+          // ★ CDP: click the input element directly
+          const box = await inp.boundingBox();
+          if (box) {
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await new Promise(r => setTimeout(r, 300));
+            await page.keyboard.down('Control');
+            await page.keyboard.press('a');
+            await page.keyboard.up('Control');
+            await page.keyboard.press('Backspace');
+            await page.keyboard.type(keyName, { delay: 30 });
+            keyNameFilled = true;
+            log("[TOKEN] Key name filled via CDP boundingBox+type!");
+            break;
+          }
         }
       }
     }
@@ -434,57 +543,53 @@ async function fetchAccessToken(page, config, log) {
   }
 
   if (!keyNameFilled) {
-    log("[TOKEN] ⚠️ Could not find key name input, trying puppeteer type on first visible input...");
-    // Last resort: try typing into first visible text input
-    const visInputs = await page.$$('input');
-    for (const inp of visInputs) {
-      const visible = await inp.evaluate(e => e.offsetParent !== null && e.type !== 'hidden').catch(() => false);
-      if (visible) {
-        await inp.click({ clickCount: 3 });
-        await new Promise(r => setTimeout(r, 200));
-        await inp.type(keyName, { delay: 30 });
-        keyNameFilled = true;
-        log("[TOKEN] Filled first visible input as fallback");
-        break;
-      }
-    }
-  }
-
-  if (!keyNameFilled) {
     log("[TOKEN] ⚠️ Failed to fill key name input");
+    try {
+      const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_input_" + handle + ".png");
+      await page.screenshot({ path: ssPath, fullPage: false });
+      log("[TOKEN] Debug screenshot: " + ssPath);
+    } catch(e) {}
     return null;
   }
   await new Promise(r => setTimeout(r, 1000));
-
-  // Step T5: Click "Add" button
-  log("[TOKEN] Clicking Add button...");
+  // Step T5: Click "Add" button in the Access Tokens section (NOT the Keys section)
+  // ★ There are TWO Add buttons: first for Keys (env vars), second for Access Tokens
+  log("[TOKEN] CDP clicking Access Tokens Add button (2nd Add)...");
   let addClicked = false;
   for (let attempt = 0; attempt < 5 && !addClicked; attempt++) {
-    addClicked = await page.evaluate(() => {
-      const btns = document.querySelectorAll('button, [role="button"], input[type="submit"]');
-      for (const btn of btns) {
-        const txt = (btn.textContent || btn.value || "").trim();
-        if (/^Add$/i.test(txt) || /^Create$/i.test(txt) || /^Generate$/i.test(txt) || /添加|创建|生成/.test(txt)) {
-          btn.click();
-          return true;
+    const addCoords = await page.evaluate(() => {
+      const addBtns = [];
+      for (const btn of document.querySelectorAll('button')) {
+        const txt = (btn.textContent || '').trim();
+        if (/^Add$/i.test(txt)) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            addBtns.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, idx: addBtns.length });
+          }
         }
       }
-      return false;
-    }).catch(() => false);
-
-    if (!addClicked) {
-      // Try puppeteer level
-      const btns = await page.$$('button');
-      for (const btn of btns) {
-        const txt = await btn.evaluate(e => e.textContent.trim()).catch(() => "");
-        if (/^Add$/i.test(txt) || /^Create$/i.test(txt) || /^Generate$/i.test(txt)) {
-          await btn.click();
-          addClicked = true;
-          break;
+      // Find "Access Tokens" heading position
+      let atY = -1;
+      for (const el of document.querySelectorAll('h1, h2, h3, h4, h5, h6, div, span, p')) {
+        if (/^Access Tokens$/i.test((el.textContent || '').trim())) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0) { atY = rect.top; break; }
         }
       }
-    }
-    if (addClicked) {
+      // Pick Add button below Access Tokens heading
+      if (atY >= 0) {
+        const below = addBtns.filter(b => b.y > atY);
+        if (below.length > 0) return below[0];
+      }
+      // Fallback: last Add button
+      if (addBtns.length >= 2) return addBtns[addBtns.length - 1];
+      if (addBtns.length === 1) return addBtns[0];
+      return null;
+    }).catch(() => null);
+    if (addCoords) {
+      log("[TOKEN] CDP click Add at (" + Math.round(addCoords.x) + "," + Math.round(addCoords.y) + ") idx=" + addCoords.idx);
+      await page.mouse.click(addCoords.x, addCoords.y);
+      addClicked = true;
       log("[TOKEN] Add button clicked!");
       break;
     }
@@ -496,104 +601,53 @@ async function fetchAccessToken(page, config, log) {
     return null;
   }
 
-  // Step T6: Wait for token to appear and copy it
+  // Step T6: Wait for token to appear and extract it
   log("[TOKEN] Waiting for token to be generated...");
   await new Promise(r => setTimeout(r, 3000));
 
   let accessToken = null;
   for (let i = 0; i < 20; i++) {
-    // Look for token in various formats
     accessToken = await page.evaluate(() => {
-      // Check for code/pre elements that might contain the token
       for (const el of document.querySelectorAll('code, pre, [class*="token"], [class*="key"], [class*="secret"], [class*="copy"]')) {
         const txt = (el.textContent || "").trim();
-        // Tokens are usually long strings (32+ chars), might start with specific prefix
-        if (txt.length >= 20 && /^[A-Za-z0-9_\-./+=]+$/.test(txt)) {
-          return txt;
-        }
+        if (txt.length >= 20 && /^[A-Za-z0-9_\-./+=]+$/.test(txt)) return txt;
       }
-
-      // Check for input/textarea with token value (readonly)
       for (const el of document.querySelectorAll('input[readonly], textarea[readonly], input[type="text"]')) {
         const val = (el.value || "").trim();
-        if (val.length >= 20 && /^[A-Za-z0-9_\-./+=]+$/.test(val)) {
-          return val;
-        }
+        if (val.length >= 20 && /^[A-Za-z0-9_\-./+=]+$/.test(val)) return val;
       }
-
-      // Check for newly appeared text that looks like a token
       const bodyText = document.body.innerText;
-      // Match patterns like: sk-xxx, zo_xxx, or any long alphanumeric string after "token"/"key" text
-      const tokenPatterns = [
+      const pats = [
         /(?:token|key|secret)[:\s]+([A-Za-z0-9_\-./+=]{20,})/i,
         /\b(zo_[A-Za-z0-9_\-]{20,})\b/,
         /\b(sk_[A-Za-z0-9_\-]{20,})\b/,
       ];
-      for (const pat of tokenPatterns) {
-        const match = bodyText.match(pat);
-        if (match) return match[1];
-      }
-
-      // Check for copy button's data attribute or sibling
+      for (const pat of pats) { const m = bodyText.match(pat); if (m) return m[1]; }
       for (const btn of document.querySelectorAll('[class*="copy"], button')) {
-        const txt = (btn.textContent || "").trim();
-        if (/copy|复制/i.test(txt)) {
-          const sibling = btn.previousElementSibling || btn.parentElement?.querySelector('code, pre, input, span[class*="token"]');
-          if (sibling) {
-            const val = (sibling.textContent || sibling.value || "").trim();
-            if (val.length >= 20) return val;
-          }
+        if (/copy|复制/i.test((btn.textContent || "").trim())) {
+          const sib = btn.previousElementSibling || btn.parentElement?.querySelector('code, pre, input, span');
+          if (sib) { const val = (sib.textContent || sib.value || "").trim(); if (val.length >= 20) return val; }
         }
       }
-
       return null;
     }).catch(() => null);
 
     if (accessToken) {
       log("[TOKEN] ✅ Access Token retrieved! (length: " + accessToken.length + ")");
-      // Also try clicking copy button for convenience
-      await page.evaluate(() => {
-        for (const btn of document.querySelectorAll('[class*="copy"], button')) {
-          const txt = (btn.textContent || "").trim();
-          if (/copy|复制/i.test(txt)) { btn.click(); return; }
-        }
-      }).catch(() => {});
       return accessToken;
     }
-
-    // Also try to get token from a dialog/modal that might appear
-    accessToken = await page.evaluate(() => {
-      const modals = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]');
-      for (const modal of modals) {
-        const txt = modal.innerText || "";
-        // Look for token-like strings
-        const match = txt.match(/([A-Za-z0-9_\-./+=]{32,})/);
-        if (match) return match[1];
-      }
-      return null;
-    }).catch(() => null);
-
-    if (accessToken) {
-      log("[TOKEN] ✅ Access Token found in dialog! (length: " + accessToken.length + ")");
-      return accessToken;
-    }
-
-    if (i % 3 === 0) log("[TOKEN] Waiting for token... (" + (i * 2) + "s)");
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  // Last resort: take a screenshot and try to get from page snapshot
-  log("[TOKEN] ⚠️ Token not found via standard methods, trying page snapshot...");
-  const pageSnapshot = await getBodyText(page, 2000);
-  const snapshotMatch = pageSnapshot.match(/([A-Za-z0-9_\-./+=]{32,})/);
-  if (snapshotMatch) {
-    log("[TOKEN] ✅ Found token in page text! (length: " + snapshotMatch[1].length + ")");
-    return snapshotMatch[1];
-  }
-
-  log("[TOKEN] ⚠️ Could not retrieve Access Token automatically");
+  log("[TOKEN] ⚠️ Token not found after waiting");
+  try {
+    const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_result_" + handle + ".png");
+    await page.screenshot({ path: ssPath, fullPage: false });
+    log("[TOKEN] Debug screenshot: " + ssPath);
+  } catch(e) {}
   return null;
 }
+
 
 // ========== Register One Email ==========
 async function registerOne(emailItem, config, log) {
@@ -606,9 +660,20 @@ async function registerOne(emailItem, config, log) {
     const launched = await launchBrowser(config, log);
     browser = launched.browser;
     tempDir = launched.tempDir;
-    const page = launched.page;
+    let page = launched.page;
     page.setDefaultTimeout(60000);
     await page.setViewport({ width: 1440, height: 900 });
+
+    // ★ Listen for popup/new tab (e.g. "Go to your Zo" might open new window)
+    let popupPage = null;
+    browser.on('targetcreated', async (target) => {
+      if (target.type() === 'page') {
+        try {
+          popupPage = await target.page();
+          log("  [POPUP] New page detected: " + (popupPage?.url() || 'about:blank').substring(0, 70));
+        } catch(e) {}
+      }
+    });
 
     // Step 1: Open signup
     log("[1/7] Opening signup...");
@@ -825,74 +890,242 @@ async function registerOne(emailItem, config, log) {
     await handleInput.type(handle, { delay: 30 });
     await new Promise(r => setTimeout(r, 1000));
 
-    const handleBtns = await page.$$("button");
-    for (const btn of handleBtns) {
-      const txt = await btn.evaluate(e => e.textContent.trim()).catch(() => "");
-      if (/^Continue$/i.test(txt)) { await btn.click(); break; }
+    // ★ Use Puppeteer native click — match "Continue" broadly (button may say "Continue to onboarding")
+    const continueClicked = await realClickByText(page, /continue/i);
+    log("  Continue click: " + (continueClicked ? "OK" : "FAILED"));
+    // Wait for page transition
+    await new Promise(r => setTimeout(r, 8000));
+    // If still on handle page, try clicking again (button may have been disabled during validation)
+    const afterClickTxt = await getBodyText(page, 500);
+    if (/choose your handle|continue to onboarding/i.test(afterClickTxt)) {
+      log("  Still on handle page, retrying Continue click...");
+      await new Promise(r => setTimeout(r, 2000));
+      await realClickByText(page, /continue/i);
+      await new Promise(r => setTimeout(r, 8000));
     }
-    await new Promise(r => setTimeout(r, 5000));
 
-    // Step 7: Boot → Go to your Zo
-    log("[7/7] Waiting for boot...");
-    for (let i = 1; i <= 50; i++) {
+    // Step 7: Onboarding (Terms → Go to your Zo → Phone skip → Survey → Boot → Main UI)
+    // Based on extension/content.js stepOnboardingTick logic
+    log("[7/7] Onboarding flow (up to 500s)...");
+    let reachedMainUI = false;
+    let finalUrl = "";
+
+    for (let i = 1; i <= 100; i++) {
       await new Promise(r => setTimeout(r, 5000));
-      const txt = await getBodyText(page, 400);
-      if (/go to your zo/i.test(txt)) {
-        log("  Boot complete! Clicking 'Go to your Zo'...");
-        await page.evaluate(() => {
-          for (const el of document.querySelectorAll("button, a, div[role=button]")) {
-            if (/go to your zo/i.test(el.textContent.trim())) { el.click(); return; }
-          }
-        });
-        await new Promise(r => setTimeout(r, 8000));
-        const finalUrl = page.url();
-        log("  SUCCESS! URL: " + finalUrl);
+      const txt = await getBodyText(page, 1000);
+      const url = page.url();
+      const hostname = new URL(url).hostname;
+      const isSubdomain = hostname.endsWith('.zo.computer') && hostname !== 'www.zo.computer';
 
-        // Move file to registered dir
-        if (registeredDir && config.emailDir) {
-          try {
-            const src = join(config.emailDir, email + ".txt");
-            const dst = join(registeredDir, email + ".txt");
-            if (existsSync(src)) fs.renameSync(src, dst);
-          } catch (e) {}
-        }
+      if (i % 5 === 0) {
+        log("  [" + (i * 5) + "s] URL: " + url.substring(0, 70) + " | Host: " + hostname);
+        log("           Text: " + txt.substring(0, 150).replace(/\n/g, " | "));
+      }
 
-        // Step 8: Fetch Access Token
-        let accessToken = null;
-        if (config.fetchToken !== false) {
-          try {
-            accessToken = await fetchAccessToken(page, config, log);
-            if (accessToken) {
-              log("[TOKEN] Access Token saved successfully!");
-              // Save token to dedicated "Access Tokens" folder
-              const tokenDir = config.accessTokenDir || join(registeredDir || '.', "Access Tokens");
-              if (!existsSync(tokenDir)) mkdirSync(tokenDir, { recursive: true });
-              const tokenFile = join(tokenDir, email + ".txt");
-              writeFileSync(tokenFile, [
-                "email: " + email,
-                "handle: " + handle,
-                "zoAddress: " + handle + ".zo.computer",
-                "accessToken: " + accessToken,
-                "time: " + new Date().toISOString(),
-              ].join("\n"), "utf-8");
-              log("[TOKEN] Saved to: " + tokenFile);
-            } else {
-              log("[TOKEN] ⚠️ Token retrieval skipped or failed (non-fatal)");
+      // ★ Completion: reached subdomain (handle.zo.computer) with main UI
+      if (isSubdomain && /dashboard|welcome|explore|home|zo space|files|chat|your conversations/i.test(txt) && !/booting|starting|loading|%/i.test(txt)) {
+        log("  ✅ Reached ZO main interface at: " + url);
+        reachedMainUI = true;
+        finalUrl = url;
+        break;
+      }
+
+      // Handle onboarding pages in priority order:
+
+      // ⓪ "Continue to onboarding" link (still on handle/signup page after setting handle)
+      if (/continue to onboarding/i.test(txt)) {
+        log("  [Onboarding] 'Continue to onboarding' detected, clicking...");
+        await realClickByText(page, /continue to onboarding/i);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+
+      // ① Terms of Use / 18 years checkbox (require actual checkbox UI or explicit terms page)
+      // ★ Only match if page has checkbox/toggle elements OR explicitly says "terms of use" as heading
+      const hasCheckboxUI = await page.evaluate(() => {
+        return document.querySelectorAll('input[type=checkbox], [role=checkbox], [role=switch], .checkbox, .toggle-switch').length > 0;
+      }).catch(() => false);
+      if (hasCheckboxUI && /terms|agree|privacy|18.*years/i.test(txt)) {
+        log("  [Onboarding] Terms/checkbox page detected (has checkbox UI)");
+        // ★ Puppeteer native: find unchecked checkboxes, get coords, click
+        const cbCoords = await page.evaluate(() => {
+          const results = [];
+          for (const cb of document.querySelectorAll('input[type=checkbox]')) {
+            if (!cb.checked) {
+              const rect = cb.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                results.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+              }
+              // Also check parent label
+              const label = cb.closest('label');
+              if (label) {
+                const lr = label.getBoundingClientRect();
+                if (lr.width > 0 && lr.height > 0) results.push({ x: lr.left + lr.width / 2, y: lr.top + lr.height / 2 });
+              }
             }
-          } catch (tokenErr) {
-            log("[TOKEN] ⚠️ Token error: " + tokenErr.message + " (non-fatal)");
+          }
+          return results;
+        });
+        for (const c of cbCoords) {
+          await page.mouse.click(c.x, c.y);
+          await new Promise(r => setTimeout(r, 300));
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        await realClickByText(page, /skip\s*for\s*now|skip|continue/i);
+        continue;
+      }
+
+      // ② Go to your Zo / Get Started / Continue to your Zo
+      if (/go to your zo|get started|continue to your/i.test(txt)) {
+        const urlBefore = page.url();
+        log("  [Onboarding] 'Go to your Zo' detected — Puppeteer native click...");
+        const clicked = await realClickByText(page, /go to your zo|get\s*started|continue to your/i);
+        log("  [Onboarding] Click result: " + (clicked ? "OK" : "FAILED"));
+        // Wait for navigation or new tab
+        await new Promise(r => setTimeout(r, 10000));
+        // Check for popup page first (from targetcreated listener)
+        if (popupPage && popupPage.url().startsWith('http') && !popupPage.url().includes('/signup')) {
+          page = popupPage;
+          popupPage = null;
+          log("  ★ Switched to popup page: " + page.url().substring(0, 70));
+          await page.bringToFront();
+        } else {
+          // Check for new tabs
+          const allPages = await browser.pages();
+          for (const p of allPages) {
+            const pUrl = p.url();
+            if (!pUrl.includes("/signup") && !pUrl.includes("about:") && pUrl.startsWith("http") && p !== page) {
+              page = p;
+              log("  ★ Switched to new page: " + pUrl.substring(0, 70));
+              await p.bringToFront();
+              break;
+            }
           }
         }
+        if (page.url() !== urlBefore) {
+          log("  URL changed to: " + page.url().substring(0, 70));
+        } else {
+          log("  URL unchanged after click: " + page.url().substring(0, 70));
+        }
+        continue;
+      }
 
-        return { handle, zoAddress: handle + ".zo.computer", url: finalUrl, accessToken };
+      // ③ Phone verification → Skip
+      if (/verify your phone|phone number|add your phone|mobile number/i.test(txt)) {
+        log("  [Onboarding] Phone verification detected, skipping...");
+        if (!await realClickByText(page, /skip|not now|maybe later/i)) {
+          await realClickByText(page, /^Continue$/i);
+        }
+        continue;
       }
-      if (/invalid|expired|something went wrong/i.test(txt) && !/booting|starting|%/i.test(txt)) {
-        throw new Error("Boot failed: " + txt.substring(0, 60));
+
+      // ④ Survey / preference selection
+      if (/what.*(interest|prefer|use)|select.*(interest|preference)|choose.*(interest)|tell us/i.test(txt)) {
+        log("  [Onboarding] Survey detected, picking random option...");
+        // ★ Puppeteer native: get clickable option coords, click randomly
+        const optCoords = await page.evaluate(() => {
+          const opts = [];
+          for (const sel of ['button', 'div[role=button]', 'label', '[class*=option]']) {
+            for (const el of document.querySelectorAll(sel)) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0 && el.textContent.trim().length > 0) {
+                opts.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+              }
+            }
+          }
+          return opts;
+        });
+        if (optCoords.length > 0) {
+          const pick = optCoords[Math.floor(Math.random() * optCoords.length)];
+          await page.mouse.click(pick.x, pick.y);
+        }
+        await new Promise(r => setTimeout(r, 1500));
+        await realClickByText(page, /continue|next|skip|done/i);
+        continue;
       }
+
+      // ⑤ Boot loading (percentage / booting)
       const pct = txt.match(/(\d+\.?\d*)%/);
-      if (pct && i % 3 === 0) log("  Boot: " + pct[1] + "%");
+      if (/booting|starting|loading|preparing|creating/i.test(txt) || pct) {
+        if (pct && i % 10 === 0) log("  Boot: " + pct[1] + "%");
+        continue;
+      }
+
+      // ⑥ Profile fallback
+      if (/set up your profile|display name/i.test(txt)) {
+        log("  [Onboarding] Profile fallback, clicking Continue...");
+        await realClickByText(page, /continue|skip/i);
+        continue;
+      }
+
+      // ⑦ Generic Continue/Skip fallback (catch-all for unrecognized onboarding pages)
+      if (/continue|skip|next/i.test(txt) && !/booting|starting|loading|%/i.test(txt)) {
+        log("  [Onboarding] Generic fallback: clicking Continue/Skip/Next...");
+        if (!await realClickByText(page, /continue/i)) {
+          if (!await realClickByText(page, /skip/i)) {
+            await realClickByText(page, /next/i);
+          }
+        }
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+
+      // Fatal errors
+      if (/invalid|expired|something went wrong/i.test(txt) && !/booting|starting|%/i.test(txt)) {
+        throw new Error("Onboarding error: " + txt.substring(0, 60));
+      }
     }
-    throw new Error("Boot timeout (250s)");
+
+    if (!reachedMainUI) {
+      const finalTxt = await getBodyText(page, 800);
+      finalUrl = page.url();
+      log("  ⚠️ Onboarding timeout. URL: " + finalUrl + " | Text: " + finalTxt.substring(0, 200));
+      // Even if not at main UI, try token retrieval if we're at a subdomain
+      const hn = new URL(finalUrl).hostname;
+      if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer') {
+        log("  ★ At subdomain, attempting token retrieval anyway...");
+        reachedMainUI = true;
+      } else {
+        throw new Error("Onboarding timeout (500s)");
+      }
+    }
+
+    // Move file to registered dir
+    if (registeredDir && config.emailDir) {
+      try {
+        const src = join(config.emailDir, email + ".txt");
+        const dst = join(registeredDir, email + ".txt");
+        if (existsSync(src)) fs.renameSync(src, dst);
+      } catch (e) {}
+    }
+
+    // Step 8: Fetch Access Token
+    let accessToken = null;
+    if (config.fetchToken !== false) {
+      try {
+        accessToken = await fetchAccessToken(page, handle, config, log);
+        if (accessToken) {
+          log("[TOKEN] Access Token saved successfully!");
+          const tokenDir = config.accessTokenDir || join(registeredDir || '.', "Access Tokens");
+          if (!existsSync(tokenDir)) mkdirSync(tokenDir, { recursive: true });
+          const tokenFile = join(tokenDir, email + ".txt");
+          writeFileSync(tokenFile, [
+            "email: " + email,
+            "handle: " + handle,
+            "zoAddress: " + handle + ".zo.computer",
+            "accessToken: " + accessToken,
+            "time: " + new Date().toISOString(),
+          ].join("\n"), "utf-8");
+          log("[TOKEN] Saved to: " + tokenFile);
+        } else {
+          log("[TOKEN] ⚠️ Token retrieval skipped or failed (non-fatal)");
+        }
+      } catch (tokenErr) {
+        log("[TOKEN] ⚠️ Token error: " + tokenErr.message + " (non-fatal)");
+      }
+    }
+
+    return { handle, zoAddress: handle + ".zo.computer", url: finalUrl, accessToken };
 
   } finally {
     if (browser) {

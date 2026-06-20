@@ -12,7 +12,7 @@ async function main() {
   const files = fs.readdirSync(EMAIL_DIR).filter(f => f.endsWith('.txt'));
   if (!files.length) { console.log("No email files!"); return; }
   
-  const file = files[2]; // Use third file (first two consumed in previous tests)
+  const file = files[10]; // Use next available file
   const content = fs.readFileSync(path.join(EMAIL_DIR, file), 'utf-8').trim();
   const [email, password, clientId, refreshToken] = content.split('----').map(s => s.trim());
   
