@@ -124,6 +124,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <option value="8">8</option>
       <option value="10">10</option>
     </select>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="fetchTokenCheck" checked onchange="toggleFetchToken()" style="width:16px;height:16px;accent-color:#6366f1">
+      🔑 自动获取Token
+    </label>
+    <input type="text" id="tokenKeyName" placeholder="密钥名称" value="API Access" style="width:120px;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;padding:8px 12px;border-radius:8px;font-size:13px" onchange="saveTokenKeyName()">
     <button class="btn btn-start" id="btnStart" onclick="startBatch()">▶ 开始注册</button>
     <button class="btn btn-stop" id="btnStop" onclick="stopBatch()" disabled>■ 停止</button>
     <button class="btn" style="background:#222;color:#aaa" onclick="loadEmails()">↻ 刷新</button>
@@ -139,10 +144,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     </div>
     <table class="email-table">
       <thead>
-        <tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th><th>操作</th></tr>
+        <tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>Access Token</th><th>进度</th><th>错误</th><th>操作</th></tr>
       </thead>
       <tbody id="emailBody">
-        <tr><td colspan="6" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr>
+        <tr><td colspan="8" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr>
       </tbody>
     </table>
   </div>
@@ -226,6 +231,12 @@ function updateEmailRow(data) {
   if (!tr) return;
   tr.querySelector('.status').innerHTML = badge(data.status);
   if (data.handle) tr.querySelector('.handle').textContent = data.handle;
+  if (data.accessToken) {
+    const tokenCell = tr.querySelector('.token');
+    if (tokenCell) {
+      tokenCell.innerHTML = '<span title="' + data.accessToken + '" style="cursor:pointer" onclick="copyToClipboard(\'' + data.accessToken + '\')">' + data.accessToken.substring(0, 16) + '... 📋</span>';
+    }
+  }
   if (data.progress) tr.querySelector('.progress').textContent = data.progress;
   if (data.error) tr.querySelector('.err').textContent = data.error;
   const btn = tr.querySelector('.btn-register-one');
@@ -260,7 +271,7 @@ async function loadEmails() {
 function renderTable() {
   const body = document.getElementById('emailBody');
   if (emails.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty"><div class="icon">📭</div>没有找到邮箱文件</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="empty"><div class="icon">📭</div>没有找到邮箱文件</td></tr>';
     document.getElementById('emailCount').textContent = '';
     return;
   }
@@ -271,6 +282,7 @@ function renderTable() {
     '<td style="font-family:monospace;font-size:12px">' + e.email + '</td>' +
     '<td class="status">' + badge(e.status) + '</td>' +
     '<td class="handle" style="color:#6366f1">' + (e.handle || '-') + '</td>' +
+    '<td class="token" style="font-family:monospace;font-size:11px;color:#22c55e">' + (e.accessToken ? '<span title="' + e.accessToken + '" style="cursor:pointer" onclick="copyToClipboard(\'' + e.accessToken + '\')">' + e.accessToken.substring(0,16) + '... 📋</span>' : '-') + '</td>' +
     '<td class="progress" style="color:#888">' + (e.progress || '-') + '</td>' +
     '<td class="err error" title="' + (e.error || '') + '">' + (e.error || '-') + '</td>' +
     '<td><button class="btn-register-one" onclick="registerOne(\'' + e.email + '\')" ' + (e.status === 'registering' || e.status === 'success' ? 'disabled' : '') + '>注册</button></td>' +
@@ -418,6 +430,34 @@ async function changeBrowserType() {
   } catch (e) {}
 }
 
+// ========== Token 配置 ==========
+async function loadTokenConfig() {
+  try {
+    const resp = await fetch('/api/token-config');
+    const data = await resp.json();
+    document.getElementById('fetchTokenCheck').checked = data.fetchToken !== false;
+    document.getElementById('tokenKeyName').value = data.tokenKeyName || 'API Access';
+  } catch(e) {}
+}
+async function toggleFetchToken() {
+  const checked = document.getElementById('fetchTokenCheck').checked;
+  await fetch('/api/token-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fetchToken: checked }) });
+  addLog('', '🔑 Token获取: ' + (checked ? '已开启' : '已关闭'));
+}
+async function saveTokenKeyName() {
+  const name = document.getElementById('tokenKeyName').value.trim() || 'API Access';
+  await fetch('/api/token-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tokenKeyName: name }) });
+}
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    addLog('', '📋 已复制到剪贴板: ' + text.substring(0, 20) + '...');
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    addLog('', '📋 已复制');
+  });
+}
+
 // 回车键应用
 document.getElementById('emailDirInput').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') applyEmailDir();
@@ -427,6 +467,7 @@ document.getElementById('emailDirInput').addEventListener('keydown', function(e)
 loadBrowserType();
 loadEmailDir();
 loadEmails();
+loadTokenConfig();
 connect();
 </script>
 </body>

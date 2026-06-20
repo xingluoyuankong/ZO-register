@@ -153,14 +153,35 @@ async function pollMagicLink(clientId, refreshToken, afterTime, maxWaitMs) {
   maxWaitMs = maxWaitMs || 180000;
   let rt = refreshToken;
   const deadline = Date.now() + maxWaitMs;
+  let pollCount = 0;
   while (Date.now() < deadline) {
+    pollCount++;
     try {
       const { accessToken, newRefreshToken } = await getMailToken(clientId, rt);
       rt = newRefreshToken;
       const link = await findMagicLink(accessToken, afterTime);
       if (link) return { link: link, newRefreshToken: rt };
+      // 每隔 3 次轮询详细打印收件箱情况，方便排查
+      if (pollCount % 3 === 0) {
+        try {
+          const debugUrl = CONFIG.GRAPH_MAIL_URL + "?$top=5&$select=subject,receivedDateTime&$orderby=receivedDateTime%20desc";
+          const resp = await fetch(debugUrl, { headers: { Authorization: "Bearer " + accessToken } });
+          const mail = await resp.json();
+          if (mail.value && mail.value.length > 0) {
+            log("\n  [DEBUG] Inbox recent " + mail.value.length + " mails (after " + afterTime.toISOString() + "):");
+            for (const msg of mail.value) {
+              log("    " + msg.receivedDateTime + " | " + (msg.subject || "(no subject)").substring(0, 80));
+            }
+          } else {
+            log("\n  [DEBUG] Inbox: no recent mails or access issue");
+            if (mail.error) log("  [DEBUG] Graph error: " + JSON.stringify(mail.error));
+          }
+        } catch (de) {
+          log("\n  [DEBUG] inbox check failed: " + de.message);
+        }
+      }
     } catch (e) {
-      log("  [WARN] poll: " + e.message);
+      log("\n  [WARN] poll: " + e.message);
     }
     process.stdout.write(".");
     await sleep(5000);
@@ -266,6 +287,376 @@ async function injectPatch(page) {
   await page.evaluate(TURNSTILE_PATCH).catch(() => {});
 }
 
+// ======================== 获取 ZO Access Token ========================
+async function getZoAccessToken(page, email, handle) {
+  log("[8/8] Obtaining ZO Access Token...");
+
+  // 8.1 导航到 Settings 页面
+  const currentUrl = page.url();
+  let settingsUrl = "https://www.zo.computer/settings";
+
+  // 从当前 URL 推断 base URL
+  const urlMatch = currentUrl.match(/^(https?:\/\/[^/]+\.zo\.computer)/);
+  if (urlMatch) {
+    settingsUrl = urlMatch[1] + "/settings";
+  } else {
+    const baseMatch = currentUrl.match(/^(https?:\/\/[^/]+)/);
+    if (baseMatch) settingsUrl = baseMatch[1] + "/settings";
+  }
+
+  log("  Navigating to settings: " + settingsUrl);
+  try {
+    await page.goto(settingsUrl, { waitUntil: "networkidle2", timeout: 30000 });
+  } catch (e) {
+    try { await page.goto(settingsUrl, { waitUntil: "domcontentloaded", timeout: 30000 }); } catch (e2) {}
+  }
+  await sleep(3000);
+
+  let bodyText = await getBodyText(page, 500);
+
+  // 如果无法到达 settings，尝试通过 UI 点击进入
+  if (!/setting|advanced|billing|my zo/i.test(bodyText)) {
+    log("  Direct URL failed, trying UI navigation...");
+
+    // 尝试点击设置齿轮图标或设置链接
+    const settingsClicked = await page.evaluate(() => {
+      // 尝试各种设置入口：齿轮图标、设置链接、用户菜单等
+      const selectors = [
+        'a[href*="settings"]', 'a[href*="setting"]',
+        'button[aria-label*="settings" i]', 'button[aria-label*="Settings" i]',
+        'a[aria-label*="settings" i]',
+        '[data-testid*="settings" i]', '[data-testid*="setting" i]',
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) { el.click(); return "selector:" + sel; }
+      }
+      // 尝试文本匹配
+      for (const el of document.querySelectorAll("a, button, [role=button]")) {
+        if (/settings|设置|gear|⚙/i.test(el.textContent.trim()) && el.offsetParent !== null) {
+          el.click(); return "text:" + el.textContent.trim();
+        }
+      }
+      return false;
+    });
+
+    if (settingsClicked) {
+      log("  Clicked settings entry: " + settingsClicked);
+      await sleep(3000);
+    } else {
+      log("  [WARN] Cannot find settings entry");
+      return null;
+    }
+  }
+
+  // 8.2 点击 "Advanced" 标签
+  log("  Clicking 'Advanced' tab...");
+  let advancedClicked = false;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    advancedClicked = await page.evaluate(() => {
+      // 策略1: 直接文本匹配 tab/按钮
+      for (const el of document.querySelectorAll("button, a, [role=tab], [role=menuitem], div[role=button], span")) {
+        const text = el.textContent.trim();
+        if (/^Advanced$/i.test(text) && el.offsetParent !== null) {
+          el.click(); return "text:" + text;
+        }
+      }
+      // 策略2: href 匹配
+      for (const el of document.querySelectorAll('a[href*="advanced"], a[href*="Advanced"]')) {
+        if (el.offsetParent !== null) { el.click(); return "href"; }
+      }
+      // 策略3: data 属性
+      for (const el of document.querySelectorAll('[data-tab="advanced"], [data-value="advanced"], [data-tab-id="advanced"]')) {
+        el.click(); return "data-attr";
+      }
+      return false;
+    });
+
+    if (advancedClicked) break;
+    await sleep(2000);
+  }
+
+  if (!advancedClicked) {
+    // 最后尝试直接导航到 advanced 页面
+    const advUrl = settingsUrl + "/advanced";
+    log("  Advanced tab not found, trying direct URL: " + advUrl);
+    try {
+      await page.goto(advUrl, { waitUntil: "networkidle2", timeout: 20000 });
+      await sleep(2000);
+    } catch (e) {}
+  } else {
+    log("  Advanced tab clicked: " + advancedClicked);
+  }
+
+  await sleep(3000);
+
+  // 8.3 确认到达 Advanced 页面，寻找 Access Tokens 区域
+  bodyText = await getBodyText(page, 1500);
+  log("  Page content preview: " + bodyText.substring(0, 200));
+
+  if (!/access\s*tokens?|api\s*key|authenticate/i.test(bodyText)) {
+    log("  [WARN] Access Tokens section not found on page");
+    await page.screenshot({ path: join(CONFIG.REGISTERED_DIR, "debug_no_advanced_" + Date.now() + ".png") }).catch(() => {});
+    return null;
+  }
+  log("  Access Tokens section found!");
+
+  // 8.4 输入密钥名称
+  const keyName = "MCP-" + handle;
+  log("  Filling key name: " + keyName);
+
+  const inputFilled = await page.evaluate((name) => {
+    // 策略1: Access Tokens 区域内的输入框
+    const tokenSection = document.querySelector('[class*="token"], [class*="Token"], [id*="token"]');
+    if (tokenSection) {
+      const inp = tokenSection.querySelector("input[type=text], input:not([type])");
+      if (inp) {
+        inp.focus(); inp.click();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+        setter.call(inp, name);
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+        return "section-input";
+      }
+    }
+    // 策略2: placeholder 匹配
+    for (const inp of document.querySelectorAll("input")) {
+      const ph = (inp.placeholder || "").toLowerCase();
+      const label = (inp.getAttribute("aria-label") || "").toLowerCase();
+      if (/key\s*name|name|token|label|e\.g/i.test(ph) || /key\s*name/i.test(label)) {
+        inp.focus(); inp.click();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+        setter.call(inp, name);
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+        return "placeholder:" + inp.placeholder;
+      }
+    }
+    // 策略3: Access Tokens 文本附近的输入框
+    for (const el of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, label, span, div")) {
+      if (/access\s*tokens?/i.test(el.textContent) && el.textContent.length < 100) {
+        const parent = el.closest("section, [class*=card], [class*=panel], [class*=container], form, div");
+        if (parent) {
+          const inp = parent.querySelector("input[type=text], input:not([type]), input[type=search]");
+          if (inp && inp.offsetParent !== null) {
+            inp.focus(); inp.click();
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            setter.call(inp, name);
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+            return "nearby-input";
+          }
+        }
+      }
+    }
+    // 策略4: 页面上唯一的文本输入框
+    const allInputs = [...document.querySelectorAll("input[type=text], input:not([type])")].filter(i => i.offsetParent !== null);
+    if (allInputs.length === 1) {
+      const inp = allInputs[0];
+      inp.focus(); inp.click();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(inp, name);
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+      return "only-input";
+    }
+    return false;
+  }, keyName);
+
+  if (!inputFilled) {
+    log("  [WARN] Key name input not found");
+    await page.screenshot({ path: join(CONFIG.REGISTERED_DIR, "debug_no_input_" + Date.now() + ".png") }).catch(() => {});
+    return null;
+  }
+  log("  Input filled via: " + inputFilled);
+  await sleep(1000);
+
+  // 8.5 点击 "Add" 按钮
+  log("  Clicking 'Add' button...");
+  let addClicked = false;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    addClicked = await page.evaluate(() => {
+      // 策略1: 文本匹配 Add 按钮
+      for (const el of document.querySelectorAll("button, [role=button], input[type=submit]")) {
+        const text = el.textContent.trim();
+        if (/^Add$/i.test(text) && el.offsetParent !== null) { el.click(); return "text:" + text; }
+      }
+      // 策略2: 按钮值
+      for (const el of document.querySelectorAll('input[type=submit][value*="add" i], button[value*="add" i]')) {
+        el.click(); return "value:" + el.value;
+      }
+      // 策略3: Access Tokens 区域内的按钮
+      for (const el of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, label, span")) {
+        if (/access\s*tokens?/i.test(el.textContent) && el.textContent.length < 100) {
+          const parent = el.closest("section, [class*=card], [class*=panel], [class*=container], form, div");
+          if (parent) {
+            const btn = parent.querySelector('button, [role=button], input[type=submit]');
+            if (btn && btn.offsetParent !== null && /add|create|generate|添加|创建/i.test(btn.textContent || btn.value || "")) {
+              btn.click(); return "section-btn:" + (btn.textContent || btn.value).trim();
+            }
+          }
+        }
+      }
+      return false;
+    });
+
+    if (addClicked) break;
+    await sleep(1500);
+  }
+
+  if (!addClicked) {
+    // 尝试按 Enter 键提交
+    log("  Add button not found, trying Enter key...");
+    await page.keyboard.press("Enter");
+    addClicked = "enter-key";
+  }
+  log("  Add clicked via: " + addClicked);
+
+  // 8.6 等待 Token 生成
+  await sleep(5000);
+
+  // 8.7 获取生成的 Token
+  log("  Retrieving generated token...");
+  let token = null;
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    // 策略1: 查找 code / pre / 等宽元素中的 token
+    token = await page.evaluate(() => {
+      const codeEls = document.querySelectorAll("code, pre, .token, [class*=token-value], [class*=api-key], [class*=secret], [class*=mono], kbd, samp, [style*='monospace'], [style*='Courier']");
+      for (const el of codeEls) {
+        const text = el.textContent.trim();
+        // 匹配各种 token 格式
+        if (text.length >= 20 && /^[a-zA-Z0-9+/=_\-:.]+$/.test(text)) {
+          return { token: text, method: "code-element:" + el.tagName };
+        }
+      }
+      return null;
+    });
+
+    if (token) break;
+
+    // 策略2: 查找只读 input / textarea（通常用于显示生成的密钥）
+    token = await page.evaluate(() => {
+      const inputs = document.querySelectorAll("input[readonly], textarea[readonly], input[disabled], input[type=text]");
+      for (const inp of inputs) {
+        const val = inp.value.trim();
+        if (val.length >= 20 && /^[a-zA-Z0-9+/=_\-:.]+$/.test(val) && !/http|www/i.test(val)) {
+          return { token: val, method: "input-value" };
+        }
+      }
+      return null;
+    });
+
+    if (token) break;
+
+    // 策略3: 查找 clipboard / copy 相关按钮旁边的文本
+    token = await page.evaluate(() => {
+      // 找到复制按钮，获取其关联的文本
+      for (const btn of document.querySelectorAll("button, [role=button], a")) {
+        const btnText = btn.textContent.trim();
+        if (/copy|复制|clipboard/i.test(btnText)) {
+          const parent = btn.closest("div, section, li, tr, [class*=row], [class*=item]");
+          if (parent) {
+            // 查找父元素中最长的疑似 token 文本
+            const allText = parent.innerText.split("\n");
+            for (const t of allText) {
+              const trimmed = t.trim();
+              if (trimmed.length >= 20 && /^[a-zA-Z0-9+/=_\-:.]+$/.test(trimmed) && !/copy|复制|key\s*name|date/i.test(trimmed)) {
+                return { token: trimmed, method: "copy-btn-parent" };
+              }
+            }
+          }
+        }
+      }
+      return null;
+    });
+
+    if (token) break;
+
+    // 策略4: 从页面全文提取
+    const fullText = await page.evaluate(() => document.body ? document.body.innerText : "").catch(() => "");
+    // 匹配常见的 API key 格式：
+    // - sk_xxx, pk_xxx, key_xxx, token_xxx
+    // - 长 base64/hex 字符串
+    // - JWT (eyJ...)
+    const patterns = [
+      /(?:sk|pk|key|token|ak|zk|at)[_-][a-zA-Z0-9]{16,}/gi,
+      /\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/g,
+      /(?:^|\n)\s*([a-f0-9]{40,})\s*(?:\n|$)/gim,
+      /(?:^|\n)\s*([a-zA-Z0-9+/]{32,}={0,2})\s*(?:\n|$)/gm,
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(fullText);
+      if (match) {
+        token = { token: match[0].trim(), method: "fulltext-regex" };
+        break;
+      }
+    }
+
+    if (token) break;
+
+    // 策略5: 尝试点击 "Copy" 按钮，从剪贴板获取
+    const copyClicked = await page.evaluate(() => {
+      for (const btn of document.querySelectorAll("button, [role=button], a")) {
+        const text = btn.textContent.trim();
+        if (/^Copy$|^复制$|copy.*token|copy.*key/i.test(text) && btn.offsetParent !== null) {
+          btn.click(); return text;
+        }
+      }
+      // 尝试找 SVG 图标按钮（常见的复制图标）
+      for (const btn of document.querySelectorAll("button svg, [role=button] svg")) {
+        const parent = btn.closest("button, [role=button]");
+        if (parent && parent.offsetParent !== null) {
+          parent.click(); return "svg-icon-btn";
+        }
+      }
+      return false;
+    });
+
+    if (copyClicked) {
+      log("  Clicked copy button: " + copyClicked + ", trying clipboard...");
+      await sleep(1000);
+      // 尝试通过 CDP 获取剪贴板
+      try {
+        const clipText = await page.evaluate(async () => {
+          try { return await navigator.clipboard.readText(); } catch (e) { return null; }
+        });
+        if (clipText && clipText.length >= 20 && /^[a-zA-Z0-9+/=_\-:.]+$/.test(clipText.trim())) {
+          token = { token: clipText.trim(), method: "clipboard" };
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (attempt < 7) {
+      log("  Waiting for token to appear... [" + ((attempt + 1) * 3) + "s]");
+      await sleep(3000);
+    }
+  }
+
+  if (!token) {
+    log("  [WARN] Could not retrieve token automatically");
+    await page.screenshot({ path: join(CONFIG.REGISTERED_DIR, "debug_token_fail_" + Date.now() + ".png") }).catch(() => {});
+    return null;
+  }
+
+  log("  [OK] Token retrieved via " + token.method + " (length: " + token.token.length + ")");
+  log("  Token preview: " + token.token.substring(0, 40) + "...");
+
+  // 尝试点击复制按钮（方便用户手动粘贴）
+  await page.evaluate(() => {
+    for (const btn of document.querySelectorAll("button, [role=button], a")) {
+      if (/copy|复制/i.test(btn.textContent.trim()) && btn.offsetParent !== null) {
+        btn.click(); return;
+      }
+    }
+  }).catch(() => {});
+
+  return token.token;
+}
+
 // ======================== 单个邮箱注册 ========================
 async function registerOne(browser, account) {
   const { email, password, clientId, refreshToken } = account;
@@ -293,7 +684,7 @@ async function registerOne(browser, account) {
 
   try {
     // Step 1: Open signup page
-    log("[1/7] Opening signup page...");
+    log("[1/8] Opening signup page...");
     await page.goto(CONFIG.SIGNUP_URL, { waitUntil: "networkidle2", timeout: 45000 });
     await sleep(3000);
 
@@ -302,7 +693,7 @@ async function registerOne(browser, account) {
     log("  Patch active: " + patchActive);
 
     // Step 2: Click "Email me a sign-up link"
-    log("[2/7] Clicking 'Email me a sign-up link'...");
+    log("[2/8] Clicking 'Email me a sign-up link'...");
     let emailBtnClicked = false;
     for (let attempt = 0; attempt < 5; attempt++) {
       emailBtnClicked = await page.evaluate(() => {
@@ -325,7 +716,7 @@ async function registerOne(browser, account) {
     await sleep(3000);
 
     // Step 3: Fill email -> Continue
-    log("[3/7] Filling email: " + email);
+    log("[3/8] Filling email: " + email);
     let emailInput = null;
     for (let i = 0; i < 15; i++) {
       emailInput = await page.$("input[type=email], input#email, input[name=email], input[placeholder*='email' i]");
@@ -369,7 +760,7 @@ async function registerOne(browser, account) {
     log("[OK] Email sent at " + new Date().toISOString());
 
     // Step 4: Poll inbox for magic link
-    log("[4/7] Polling inbox for magic link...");
+    log("[4/8] Polling inbox for magic link...");
     const result = await pollMagicLink(clientId, refreshToken, sendTime);
     if (!result) throw new Error("Magic link not found in 3 minutes");
     const link = result.link;
@@ -382,7 +773,7 @@ async function registerOne(browser, account) {
     }
 
     // Step 5: Open magic link
-    log("[5/7] Opening magic link...");
+    log("[5/8] Opening magic link...");
     try {
       await page.goto(link, { waitUntil: "domcontentloaded", timeout: 60000 });
     } catch (navErr) {
@@ -506,7 +897,7 @@ async function registerOne(browser, account) {
     }
 
     // Step 6: Set handle
-    log("[6/7] Setting handle...");
+    log("[6/8] Setting handle...");
     let handleInput = null;
     for (let i = 0; i < 20; i++) {
       handleInput = await page.$("input[placeholder='you']") || await page.$("input[type=text]") || await page.$("input:not([type=hidden]):not([type=submit])");
@@ -524,7 +915,7 @@ async function registerOne(browser, account) {
     await sleep(5000);
 
     // Step 7: Wait for boot -> Go to your Zo
-    log("[7/7] Waiting for computer to boot...");
+    log("[7/8] Waiting for computer to boot...");
     for (let i = 1; i <= 60; i++) {
       await sleep(5000);
       const bodyText = await getBodyText(page, 400);
@@ -536,12 +927,37 @@ async function registerOne(browser, account) {
         const finalUrl = page.url();
         log("[OK] Final URL: " + finalUrl);
 
+        // Step 8: 自动获取 ZO Access Token
+        let accessToken = null;
+        try {
+          accessToken = await getZoAccessToken(page, email, handle);
+          if (accessToken) {
+            log("[OK] Access Token obtained for " + email);
+          } else {
+            log("[WARN] Failed to get Access Token for " + email);
+          }
+        } catch (tokenErr) {
+          log("[WARN] Token retrieval error: " + tokenErr.message);
+        }
+
         const regResult = {
           email: email, handle: handle, url: finalUrl,
           zoAddress: handle + ".zo.computer",
+          accessToken: accessToken || null,
           time: new Date().toISOString(), status: "success"
         };
         appendFileSync(CONFIG.RESULTS_FILE, JSON.stringify(regResult) + "\n");
+
+        // 如果有 token，额外保存到凭证文件
+        if (accessToken) {
+          try {
+            const tokenFile = join(CONFIG.REGISTERED_DIR, "tokens_" + email + ".txt");
+            writeFileSync(tokenFile, "email: " + email + "\nhandle: " + handle + "\nzoAddress: " + handle + ".zo.computer\naccessToken: " + accessToken + "\ntime: " + new Date().toISOString() + "\n", "utf-8");
+            log("  Token saved to: " + tokenFile);
+          } catch (e) {
+            log("  [WARN] Failed to save token file: " + e.message);
+          }
+        }
 
         try { renameSync(join(CONFIG.EMAIL_DIR, email + ".txt"), join(CONFIG.REGISTERED_DIR, email + ".txt")); } catch (e) {}
 

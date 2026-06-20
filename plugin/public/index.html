@@ -75,6 +75,11 @@
       <select id="browserType" onchange="changeBrowserType()"><option value="edge">Edge (无痕)</option><option value="chrome">Chrome (无痕)</option></select>
       <label>并发数</label>
       <select id="concurrency"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="fetchTokenCheck" checked onchange="toggleFetchToken()" style="width:16px;height:16px;accent-color:#6366f1">
+        🔑 自动获取Token
+      </label>
+      <input type="text" id="tokenKeyName" placeholder="密钥名称" value="API Access" style="width:120px;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;padding:6px 10px;border-radius:8px;font-size:12px" onchange="saveTokenKeyName()">
       <button class="btn btn-start" id="btnStart" onclick="startBatch()">▶ 开始注册</button>
       <button class="btn btn-stop" id="btnStop" onclick="stopBatch()" disabled>■ 停止</button>
       <button class="btn" style="background:#222;color:#aaa" onclick="loadEmails()">↻ 刷新</button>
@@ -82,8 +87,8 @@
     </div>
     <div class="table-wrap">
       <div class="table-header"><span style="font-size:13px;font-weight:600">📧 邮箱列表</span><span id="emailCount" style="font-size:12px;color:#555"></span></div>
-      <table><thead><tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>进度</th><th>错误</th><th>操作</th></tr></thead>
-      <tbody id="emailBody"><tr><td colspan="7" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr></tbody></table>
+      <table><thead><tr><th>#</th><th>邮箱</th><th>状态</th><th>Handle</th><th>Access Token</th><th>进度</th><th>错误</th><th>操作</th></tr></thead>
+      <tbody id="emailBody"><tr><td colspan="8" class="empty"><div class="icon">📭</div>点击 "刷新" 加载邮箱</td></tr></tbody></table>
     </div>
     <div class="log-panel">
       <div class="log-panel-header"><span>📋 实时日志</span><span class="dot"></span></div>
@@ -111,6 +116,12 @@ function updateEmailRow(d) {
   if (!tr) return;
   tr.querySelector('.status').innerHTML = badge(d.status);
   if (d.handle) tr.querySelector('.handle').textContent = d.handle;
+  if (d.accessToken) {
+    const tokenCell = tr.querySelector('.token');
+    if (tokenCell) {
+      tokenCell.innerHTML = '<span title="' + d.accessToken + '" style="cursor:pointer" onclick="copyToClipboard(\'' + d.accessToken + '\')">' + d.accessToken.substring(0, 16) + '... 📋</span>';
+    }
+  }
   if (d.progress) tr.querySelector('.progress').textContent = d.progress;
   if (d.error) tr.querySelector('.err').textContent = d.error;
   const btn = tr.querySelector('.btn-register-one');
@@ -118,10 +129,10 @@ function updateEmailRow(d) {
 }
 function renderTable() {
   const body = document.getElementById('emailBody');
-  if (!emails.length) { body.innerHTML = '<tr><td colspan="7" class="empty"><div class="icon">📭</div>无邮箱文件</td></tr>'; document.getElementById('emailCount').textContent = ''; return; }
+  if (!emails.length) { body.innerHTML = '<tr><td colspan="8" class="empty"><div class="icon">📭</div>无邮箱文件</td></tr>'; document.getElementById('emailCount').textContent = ''; return; }
   document.getElementById('emailCount').textContent = emails.length + ' 个';
   body.innerHTML = emails.map((e, i) =>
-    '<tr data-email="' + e.email + '"><td style="color:#555">' + (i+1) + '</td><td style="font-family:monospace;font-size:12px">' + e.email + '</td><td class="status">' + badge(e.status) + '</td><td class="handle" style="color:#6366f1">' + (e.handle||'-') + '</td><td class="progress" style="color:#888">' + (e.progress||'-') + '</td><td class="err error" title="' + (e.error||'') + '">' + (e.error||'-') + '</td><td><button class="btn-register-one" onclick="registerOne(\'' + e.email + '\')" ' + (e.status==='registering'||e.status==='success' ? 'disabled' : '') + '>注册</button></td></tr>'
+    '<tr data-email="' + e.email + '"><td style="color:#555">' + (i+1) + '</td><td style="font-family:monospace;font-size:12px">' + e.email + '</td><td class="status">' + badge(e.status) + '</td><td class="handle" style="color:#6366f1">' + (e.handle||'-') + '</td><td class="token" style="font-family:monospace;font-size:11px;color:#22c55e">' + (e.accessToken ? '<span title="' + e.accessToken + '" style="cursor:pointer" onclick="copyToClipboard(\'' + e.accessToken + '\')">' + e.accessToken.substring(0,16) + '... 📋</span>' : '-') + '</td><td class="progress" style="color:#888">' + (e.progress||'-') + '</td><td class="err error" title="' + (e.error||'') + '">' + (e.error||'-') + '</td><td><button class="btn-register-one" onclick="registerOne(\'' + e.email + '\')" ' + (e.status==='registering'||e.status==='success' ? 'disabled' : '') + '>注册</button></td></tr>'
   ).join('');
 }
 async function loadEmails() { const r = await fetch('/api/emails'); const d = await r.json(); emails = d.emails; updateStats(d.stats); renderTable(); loadEmailDir(); }
@@ -131,13 +142,17 @@ async function registerOne(email) { if (!confirm('确认注册 ' + email + '？'
 async function loadEmailDir() { try { const r = await fetch('/api/email-dir'); const d = await r.json(); document.getElementById('emailDirInput').value = d.dir; } catch (e) {} }
 async function applyEmailDir() { const dir = document.getElementById('emailDirInput').value.trim(); if (!dir) return; const r = await fetch('/api/email-dir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) }); const d = await r.json(); if (d.ok) { loadEmails(); } else { alert(d.error); } }
 async function changeBrowserType() { const bt = document.getElementById('browserType').value; await fetch('/api/browser-type', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browserType: bt }) }); addLog('', '🌐 浏览器: ' + bt); }
+async function loadTokenConfig() { try { const r = await fetch('/api/token-config'); const d = await r.json(); document.getElementById('fetchTokenCheck').checked = d.fetchToken !== false; document.getElementById('tokenKeyName').value = d.tokenKeyName || 'API Access'; } catch(e) {} }
+async function toggleFetchToken() { const checked = document.getElementById('fetchTokenCheck').checked; await fetch('/api/token-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fetchToken: checked }) }); addLog('', '🔑 Token获取: ' + (checked ? '已开启' : '已关闭')); }
+async function saveTokenKeyName() { const name = document.getElementById('tokenKeyName').value.trim() || 'API Access'; await fetch('/api/token-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tokenKeyName: name }) }); }
+function copyToClipboard(text) { navigator.clipboard.writeText(text).then(() => addLog('', '📋 已复制到剪贴板: ' + text.substring(0, 20) + '...')).catch(() => { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); addLog('', '📋 已复制'); }); }
 function connect() {
   ws = new WebSocket('ws://' + location.host);
   ws.onopen = () => { document.getElementById('connStatus').innerHTML = '<span style="color:#22c55e">● 已连接</span>'; };
   ws.onclose = () => { document.getElementById('connStatus').innerHTML = '<span style="color:#ef4444">● 断开</span>'; setTimeout(connect, 3000); };
   ws.onmessage = (e) => {
     const { type, data } = JSON.parse(e.data);
-    if (type === 'init') { updateStats(data.stats); if (data.concurrency) document.getElementById('concurrency').value = data.concurrency; if (data.emailDir) document.getElementById('emailDirInput').value = data.emailDir; if (data.browserType) document.getElementById('browserType').value = data.browserType; }
+    if (type === 'init') { updateStats(data.stats); if (data.concurrency) document.getElementById('concurrency').value = data.concurrency; if (data.emailDir) document.getElementById('emailDirInput').value = data.emailDir; if (data.browserType) document.getElementById('browserType').value = data.browserType; loadTokenConfig(); }
     else if (type === 'stats') updateStats(data);
     else if (type === 'email_update') updateEmailRow(data);
     else if (type === 'emails_loaded') { emails = data.emails; updateStats(data.stats); renderTable(); }
@@ -148,7 +163,7 @@ function connect() {
   };
 }
 document.getElementById('emailDirInput').addEventListener('keydown', e => { if (e.key === 'Enter') applyEmailDir(); });
-loadEmails(); connect();
+loadEmails(); loadTokenConfig(); connect();
 </script>
 </body>
 </html>

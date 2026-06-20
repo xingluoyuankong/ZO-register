@@ -5,9 +5,9 @@
 const express = require("express");
 const http = require("http");
 const { WebSocketServer } = require("ws");
-const { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync } = require("fs");
+const { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, rmSync } = require("fs");
 const { join } = require("path");
-const { registerOne } = require("./zo_register");
+const { registerOne, fetchAccessToken, launchBrowser } = require("./zo_register");
 
 // ========== Config ==========
 const WEB_PORT = 3456;
@@ -19,6 +19,8 @@ let config = {
   emailDir: "C:\\Users\\XZXyuan\\Downloads\\批量注册邮箱\\已经使用",
   browserType: "edge",
   concurrency: 1,
+  fetchToken: true,       // 注册成功后自动获取 Access Token
+  tokenKeyName: "API Access", // Token 密钥名称
 };
 
 // Load saved config
@@ -99,6 +101,8 @@ async function registerSingle(emailItem) {
     const result = await registerOne(emailItem, {
       ...config,
       registeredDir: REGISTERED_DIR,
+      fetchToken: config.fetchToken,
+      tokenKeyName: config.tokenKeyName,
     }, log);
     setEmailStatus(emailItem.email, "success", result);
     appendFileSync(RESULTS_FILE, JSON.stringify({ ...emailItem, ...result, time: new Date().toISOString() }) + "\n");
@@ -228,6 +232,46 @@ app.get("/api/registered", (req, res) => {
     });
   }
   res.json({ files, results });
+});
+
+// --- Fetch Token Config ---
+app.get("/api/token-config", (req, res) => {
+  res.json({ fetchToken: config.fetchToken, tokenKeyName: config.tokenKeyName });
+});
+app.post("/api/token-config", (req, res) => {
+  if (req.body.fetchToken !== undefined) config.fetchToken = !!req.body.fetchToken;
+  if (req.body.tokenKeyName) config.tokenKeyName = req.body.tokenKeyName;
+  saveConfig();
+  res.json({ ok: true, fetchToken: config.fetchToken, tokenKeyName: config.tokenKeyName });
+});
+
+// --- Standalone Token Fetch (for already registered accounts) ---
+app.post("/api/fetch-token", async (req, res) => {
+  const { zoUrl } = req.body || {};
+  if (!zoUrl) return res.json({ ok: false, error: "请提供 ZO URL (如 https://user123.zo.computer)" });
+
+  res.json({ ok: true, msg: "Token 获取已启动，请查看日志" });
+
+  const log = (msg) => {
+    broadcast("log", { email: "[TOKEN]", msg });
+    console.log("[TOKEN] " + msg);
+  };
+
+  try {
+    const launched = await launchBrowser(config, log);
+    const { browser, page, tempDir } = launched;
+    try {
+      await page.goto(zoUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await new Promise(r => setTimeout(r, 3000));
+      const token = await fetchAccessToken(page, config, log);
+      broadcast("log", { email: "[TOKEN]", msg: token ? "Token: " + token.substring(0, 20) + "..." : "未获取到 Token" });
+    } finally {
+      await browser.close().catch(() => {});
+      try { rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+    }
+  } catch (e) {
+    broadcast("log", { email: "[TOKEN]", msg: "错误: " + e.message });
+  }
 });
 
 // --- WebSocket ---
