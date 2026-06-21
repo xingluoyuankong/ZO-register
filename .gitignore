@@ -1,5 +1,62 @@
-﻿node_modules/
-logs/
+# Dependencies
+node_modules/
 
-# Sensitive keys
+# Credentials & Secrets (NEVER push)
+zo.txt
+**/zo.txt
+registered/Access Tokens/
+registered/*.txt
+registered/at_results.jsonl
+registered/results.jsonl
+registered/results.jsonl.bak
+registered/results.json
+registered/ACCOUNTS.md
+registered/SUMMARY.md
+plugin/test_email.json
+plugin/test_inbox.json
+plugin/test_raw.json
+plugin/test_result.json
+plugin/test_output*.log
 key/
+
+# Debug screenshots
+registered/*.png
+registered/screenshots/
+registered/debug_*.png
+plugin/registered/
+
+# Temp files
+logs/
+*.log
+E:\Openclaw\tmp\
+
+# Test / debug / diagnostic scripts (plugin/)
+plugin/debug_*.js
+plugin/diag_*.js
+plugin/dump_*.js
+plugin/test_*.js
+plugin/test_*.json
+plugin/test_*.log
+plugin/check_maildrop.js
+plugin/fix_wait.js
+plugin/integrate_tempmail.js
+
+# Legacy root-level scripts (keep for reference but don't track changes)
+# These are old iterations kept locally only
+
+# Debug screenshots & data
+*.png
+*.rar
+signup-click-data.json
+signup-page-data.json
+results.jsonl
+keepalive-scripts/accounts.json
+keepalive-scripts/screenshots/
+
+# Legacy / other AI rewrites (not tracked)
+zo_register_optimized.cjs
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini

@@ -298,7 +298,7 @@ async function fetchAccessToken(page, handle, config, log) {
 
   let settingsLoaded = false;
 
-  // Strategy A: Try URL patterns
+  // Strategy A: Try URL patterns (settings is inside user's ZO space — space must be booted first!)
   const settingsUrls = [
     "https://" + handle + ".zo.computer/settings",
     "https://" + handle + ".zo.computer/settings/advanced",
@@ -310,10 +310,10 @@ async function fetchAccessToken(page, handle, config, log) {
   for (const sUrl of settingsUrls) {
     try {
       log("[TOKEN] Trying URL: " + sUrl);
-      await page.goto(sUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await new Promise(r => setTimeout(r, 3000));
+      await page.goto(sUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await new Promise(r => setTimeout(r, 8000));
       const txt = await getBodyText(page, 800);
-      if (/setting|advanced|profile|account|general|token|api.?key/i.test(txt)) {
+      if (/setting|advanced|profile|account|general|token|api.?key|\u8BBE\u7F6E|\u9AD8\u7EA7|\u4E2A\u4EBA|\u8D26\u6237|\u5BC6\u94A5|\u4EE4\u724C/i.test(txt)) {
         log("[TOKEN] ✅ Settings page loaded via URL!");
         settingsLoaded = true;
         break;
@@ -328,8 +328,8 @@ async function fetchAccessToken(page, handle, config, log) {
   if (!settingsLoaded) {
     log("[TOKEN] Going to dashboard to find settings via UI...");
     try {
-      await page.goto("https://" + handle + ".zo.computer/", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await new Promise(r => setTimeout(r, 5000));
+      await page.goto("https://" + handle + ".zo.computer/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await new Promise(r => setTimeout(r, 15000));
     } catch(e) {
       log("[TOKEN] Dashboard nav error: " + e.message.substring(0, 50));
     }
@@ -376,21 +376,27 @@ async function fetchAccessToken(page, handle, config, log) {
         await page.mouse.click(avatarCoords.x, avatarCoords.y);
       }
     }
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 5000));
 
     // Check for dropdown menu
     const menuTxt = await getBodyText(page, 1500);
     log("[TOKEN] After profile click: " + menuTxt.substring(0, 200).replace(/\n/g, " | "));
 
-    if (/settings|setting/i.test(menuTxt)) {
+    if (/settings|setting|\u8BBE\u7F6E/i.test(menuTxt)) {
       log("[TOKEN] 'Settings' in menu — CDP click...");
-      const clicked = await realClickByText(page, /settings/i);
+      const clicked = await realClickByText(page, /settings|\u8BBE\u7F6E/i);
       if (clicked) {
-        await new Promise(r => setTimeout(r, 3000));
-        const afterTxt = await getBodyText(page, 800);
-        if (/setting|advanced|profile|account|general/i.test(afterTxt)) {
-          settingsLoaded = true;
-          log("[TOKEN] ✅ Settings opened via menu!");
+        // ★ Poll up to 30s for settings content to load
+        log("[TOKEN] Waiting for settings page to load...");
+        for (let w = 0; w < 15; w++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const afterTxt = await getBodyText(page, 800);
+          if (/setting|advanced|profile|account|general|token|api.?key|设置|高级|个人|账户|密钥|令牌/i.test(afterTxt)) {
+            settingsLoaded = true;
+            log("[TOKEN] ✅ Settings opened via menu! (waited " + ((w+1)*2) + "s)");
+            break;
+          }
+          log("[TOKEN] Settings not ready yet (" + ((w+1)*2) + "s): " + afterTxt.substring(0, 80).replace(/\n/g, " | "));
         }
       }
     }
@@ -409,12 +415,16 @@ async function fetchAccessToken(page, handle, config, log) {
       if (settingsHref) {
         log("[TOKEN] Found href: " + settingsHref);
         try {
-          await page.goto(settingsHref, { waitUntil: "domcontentloaded", timeout: 15000 });
-          await new Promise(r => setTimeout(r, 3000));
-          const txt = await getBodyText(page, 800);
-          if (/setting|advanced|profile|account/i.test(txt)) {
-            settingsLoaded = true;
-            log("[TOKEN] ✅ Settings loaded via href!");
+          await page.goto(settingsHref, { waitUntil: "domcontentloaded", timeout: 30000 });
+          // Poll for settings to load
+          for (let w = 0; w < 10; w++) {
+            await new Promise(r => setTimeout(r, 2000));
+            const txt = await getBodyText(page, 800);
+            if (/setting|advanced|profile|account|token|api.?key|设置|高级|个人|账户|密钥|令牌/i.test(txt)) {
+              settingsLoaded = true;
+              log("[TOKEN] ✅ Settings loaded via href! (waited " + ((w+1)*2) + "s)");
+              break;
+            }
           }
         } catch(e) {}
       }
@@ -437,11 +447,15 @@ async function fetchAccessToken(page, handle, config, log) {
       if (iconCoords) {
         log("[TOKEN] CDP click gear icon at (" + Math.round(iconCoords.x) + "," + Math.round(iconCoords.y) + ")");
         await page.mouse.click(iconCoords.x, iconCoords.y);
-        await new Promise(r => setTimeout(r, 3000));
-        const txt = await getBodyText(page, 800);
-        if (/setting|advanced|profile|account/i.test(txt)) {
-          settingsLoaded = true;
-          log("[TOKEN] ✅ Settings via gear icon!");
+        // Poll for settings to load
+        for (let w = 0; w < 10; w++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const txt = await getBodyText(page, 800);
+          if (/setting|advanced|profile|account|token|api.?key|设置|高级|个人|账户|密钥|令牌/i.test(txt)) {
+            settingsLoaded = true;
+            log("[TOKEN] ✅ Settings via gear icon! (waited " + ((w+1)*2) + "s)");
+            break;
+          }
         }
       }
     }
@@ -464,7 +478,7 @@ async function fetchAccessToken(page, handle, config, log) {
     advancedClicked = await realClickByText(page, /advanced|高级/i);
     if (advancedClicked) {
       log("[TOKEN] Advanced tab clicked!");
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 10000));
       break;
     }
     await new Promise(r => setTimeout(r, 2000));
@@ -477,7 +491,7 @@ async function fetchAccessToken(page, handle, config, log) {
   log("[TOKEN] Entering key name: " + keyName);
 
   let keyNameFilled = false;
-  for (let attempt = 0; attempt < 8 && !keyNameFilled; attempt++) {
+  for (let attempt = 0; attempt < 15 && !keyNameFilled; attempt++) {
     const inputCoords = await page.evaluate(() => {
       const allInputs = document.querySelectorAll('input[type="text"], input:not([type]), input[placeholder]');
       for (const inp of allInputs) {
@@ -539,7 +553,7 @@ async function fetchAccessToken(page, handle, config, log) {
         }
       }
     }
-    if (!keyNameFilled) await new Promise(r => setTimeout(r, 2000));
+    if (!keyNameFilled) await new Promise(r => setTimeout(r, 3000));
   }
 
   if (!keyNameFilled) {
@@ -603,7 +617,7 @@ async function fetchAccessToken(page, handle, config, log) {
 
   // Step T6: Wait for token to appear and extract it
   log("[TOKEN] Waiting for token to be generated...");
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 5000));
 
   let accessToken = null;
   for (let i = 0; i < 20; i++) {
