@@ -1,12 +1,19 @@
 # Dependencies
 node_modules/
 
+# Config files with credentials
+config.json
+plugin/config.json
+
 # Credentials & Secrets (NEVER push)
 zo.txt
 **/zo.txt
 registered/Access Tokens/
+registered/Cookie ATs/
 registered/*.txt
 registered/at_results.jsonl
+registered/cookie_at_results.jsonl
+registered/register_results.jsonl
 registered/results.jsonl
 registered/results.jsonl.bak
 registered/results.json

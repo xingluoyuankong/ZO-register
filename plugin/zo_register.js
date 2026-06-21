@@ -668,6 +668,7 @@ async function registerOne(emailItem, config, log) {
   const { email, password, clientId, refreshToken } = emailItem;
   const registeredDir = config.registeredDir;
   let browser, tempDir;
+  let capturedCookieAT = null;
 
   try {
     // Launch browser
@@ -819,11 +820,23 @@ async function registerOne(emailItem, config, log) {
     // ★ NO button clicks — page auto-redirects after Turnstile passes
     log("  Waiting for Turnstile auto-solve + redirect (NO clicks)...");
     let reachedHandlePage = false;
+    let alreadyRegistered = false;
     const startUrl = page.url();
 
     for (let i = 0; i < 60; i++) {
       const txt = await getBodyText(page, 600);
       const currentUrl = page.url();
+
+      // ★ Check if we landed directly on the main UI (already registered account)
+      try {
+        const hn = new URL(currentUrl).hostname;
+        if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer' && !currentUrl.includes('/signup') && !currentUrl.includes('/email-login')) {
+          log("  ✅ Already registered! Directly at main UI: " + currentUrl);
+          alreadyRegistered = true;
+          reachedHandlePage = true;
+          break;
+        }
+      } catch(e) {}
 
       // Check if we reached the handle page
       if (/choose your handle/i.test(txt) || (currentUrl.includes("/signup") && /handle/i.test(txt))) {
@@ -840,6 +853,72 @@ async function registerOne(emailItem, config, log) {
       // Monitor redirect progress
       if (/redirecting/i.test(txt)) {
         if (i % 5 === 0) log("  [" + (i * 3) + "s] Page redirecting...");
+
+        // ★ Stuck redirect recovery: after 20s, try manual confirm + navigate
+        if (i >= 7 && currentUrl.includes('email-login/verify')) {
+          log("  ★ Redirect stuck, attempting manual confirm...");
+          try {
+            // Extract token from URL
+            const tokenMatch = currentUrl.match(/token=([^&]+)/);
+            if (tokenMatch) {
+              // Call confirm API from page context (sets auth cookie)
+              const confirmResult = await page.evaluate(async (token) => {
+                try {
+                  const resp = await fetch('/api/email-login/confirm?token=' + token, {
+                    credentials: 'include',
+                    redirect: 'follow',
+                  });
+                  return { status: resp.status, ok: resp.ok };
+                } catch(e) {
+                  return { error: e.message };
+                }
+              }, tokenMatch[1]);
+              log("  Confirm API: " + JSON.stringify(confirmResult));
+
+              // Check if access_token cookie was set
+              const cookiesAfterConfirm = await page.cookies();
+              const atCookie = cookiesAfterConfirm.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+              if (atCookie) {
+                log("  ✅ access_token cookie set after manual confirm!");
+              }
+
+              // Navigate to redirect target
+              const redirectMatch = currentUrl.match(/redirect=([^&]+)/);
+              const redirectTarget = redirectMatch ? decodeURIComponent(redirectMatch[1]) : '/signup';
+              log("  Navigating to: " + redirectTarget);
+              try {
+                await page.goto('https://www.zo.computer' + redirectTarget, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              } catch(navErr) {
+                log("  Nav: " + navErr.message.substring(0, 50));
+              }
+              await new Promise(r => setTimeout(r, 3000));
+              const afterNavUrl = page.url();
+              log("  After nav: " + afterNavUrl);
+
+              // Check for subdomain (already registered)
+              try {
+                const hn3 = new URL(afterNavUrl).hostname;
+                if (hn3.endsWith('.zo.computer') && hn3 !== 'www.zo.computer') {
+                  log("  ✅ Already registered! At subdomain: " + afterNavUrl);
+                  alreadyRegistered = true;
+                  reachedHandlePage = true;
+                  break;
+                }
+              } catch(e) {}
+
+              // Check for handle page
+              const afterNavTxt = await getBodyText(page, 400);
+              if (/choose your handle/i.test(afterNavTxt)) {
+                log("  ✅ Reached handle page after manual redirect!");
+                reachedHandlePage = true;
+                break;
+              }
+            }
+          } catch(recoverErr) {
+            log("  Recovery failed: " + recoverErr.message);
+          }
+        }
+
         await new Promise(r => setTimeout(r, 3000));
         continue;
       }
@@ -848,6 +927,18 @@ async function registerOne(emailItem, config, log) {
       if (currentUrl !== startUrl && !currentUrl.includes("email-login/verify")) {
         log("  URL changed to: " + currentUrl);
         await new Promise(r => setTimeout(r, 3000));
+
+        // ★ Check for subdomain (already registered)
+        try {
+          const hn2 = new URL(page.url()).hostname;
+          if (hn2.endsWith('.zo.computer') && hn2 !== 'www.zo.computer') {
+            log("  ✅ Already registered! At subdomain: " + page.url());
+            alreadyRegistered = true;
+            reachedHandlePage = true;
+            break;
+          }
+        } catch(e) {}
+
         const afterTxt = await getBodyText(page, 400);
         if (/choose your handle/i.test(afterTxt)) {
           log("  ✅ Reached handle page after redirect!");
@@ -882,8 +973,44 @@ async function registerOne(emailItem, config, log) {
     if (!reachedHandlePage) {
       const finalTxt = await getBodyText(page, 300);
       if (/choose your handle/i.test(finalTxt)) { reachedHandlePage = true; }
-      else throw new Error("Failed to reach handle page: " + finalTxt.substring(0, 80));
+      else {
+        // ★ Last check: maybe we're at a subdomain
+        try {
+          const fhn = new URL(page.url()).hostname;
+          if (fhn.endsWith('.zo.computer') && fhn !== 'www.zo.computer') {
+            log("  ✅ Already registered (final check)! At: " + page.url());
+            alreadyRegistered = true;
+            reachedHandlePage = true;
+          }
+        } catch(e) {}
+        if (!reachedHandlePage) throw new Error("Failed to reach handle page: " + finalTxt.substring(0, 80));
+      }
     }
+
+    // ★ Skip handle + onboarding for already-registered accounts
+    let handle;
+    if (alreadyRegistered) {
+      handle = new URL(page.url()).hostname.split('.')[0];
+      finalUrl = page.url();
+      log("  ★ Already registered, handle=" + handle + ", skipping Steps 6-7");
+      
+      // ★ Capture cookie AT while we're on the workspace page
+      try {
+        const cookies = await page.cookies();
+        capturedCookieAT = cookies.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+        if (capturedCookieAT) {
+          log("  [COOKIE] ✅ AT captured directly: " + capturedCookieAT.value.substring(0, 30) + "...");
+        } else {
+          log("  [COOKIE] No AT yet, waiting 5s for cookie to set...");
+          await new Promise(r => setTimeout(r, 5000));
+          const cookies2 = await page.cookies();
+          capturedCookieAT = cookies2.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+          if (capturedCookieAT) log("  [COOKIE] ✅ AT captured after wait!");
+        }
+      } catch(e) {
+        log("  [COOKIE] Capture error: " + e.message.substring(0, 50));
+      }
+    } else {
 
     // Step 6: Choose handle
     log("[6/7] Setting handle...");
@@ -1104,6 +1231,8 @@ async function registerOne(emailItem, config, log) {
       }
     }
 
+    } // end of else (not alreadyRegistered)
+
     // Move file to registered dir
     if (registeredDir && config.emailDir) {
       try {
@@ -1139,10 +1268,48 @@ async function registerOne(emailItem, config, log) {
       }
     }
 
-    return { handle, zoAddress: handle + ".zo.computer", url: finalUrl, accessToken };
+    return { handle, zoAddress: handle + ".zo.computer", url: finalUrl, accessToken, cookieAT: capturedCookieAT };
 
   } finally {
     if (browser) {
+      // ★ Cookie AT capture (for batch_cookie_at.js)
+      if (global.__zoCookieCallback) {
+        try {
+          // Use pre-captured cookie if available
+          let atCookie = capturedCookieAT || null;
+          
+          // If not pre-captured, try getting from browser
+          if (!atCookie) {
+            const allCookies = await browser.cookies();
+            atCookie = allCookies.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+            if (atCookie) log("[COOKIE] ✅ AT found in browser cookies");
+          }
+          
+          // Last resort: navigate to workspace and try
+          if (!atCookie && typeof handle !== 'undefined' && handle) {
+            const wsUrl = `https://${handle}.zo.computer/`;
+            log("[COOKIE] Trying workspace nav: " + wsUrl);
+            try {
+              const pages = await browser.pages();
+              const cookiePage = pages[pages.length - 1] || pages[0];
+              await cookiePage.goto(wsUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 8000));
+              const allCookies = await browser.cookies();
+              atCookie = allCookies.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+              if (atCookie) log("[COOKIE] ✅ AT captured on retry!");
+              else log("[COOKIE] ❌ Still no AT after retry");
+            } catch(e) {
+              log("[COOKIE] Retry nav failed: " + e.message.substring(0, 60));
+            }
+          }
+          
+          if (atCookie) {
+            global.__zoCookieCallback(atCookie);
+          }
+        } catch(e) {
+          log("[COOKIE] Capture error: " + e.message);
+        }
+      }
       try { await browser.close(); } catch (e) {}
       if (tempDir) try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
       log("[BROWSER] Cleaned up");
