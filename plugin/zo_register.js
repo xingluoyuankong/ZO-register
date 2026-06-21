@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ZO Computer - Core Registration Logic
  * Modular plugin for batch email registration
  */
@@ -58,19 +58,21 @@ async function launchBrowser(config, log) {
   const extDir = config.turnstileExtDir || join(__dirname, "..", "turnstile-extension");
   const extExists = existsSync(join(extDir, "manifest.json"));
 
+  // ★ Original stable launch args (restored after crashes)
   const launchArgs = [
     "--no-first-run", "--no-default-browser-check", "--disable-default-apps",
     "--disable-features=Translate", "--disable-blink-features=AutomationControlled",
-    "--window-size=1440,900", "--disk-cache-size=0",
+    "--window-size=1440,900",
     "--disable-save-password-bubble", "--disable-password-generation",
     "--password-store=basic", "--disable-sync",
-    "--disable-client-side-phishing-detection", "--disable-background-networking",
-    "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding", "--disable-hang-monitor",
-    "--disable-gpu", "--disable-software-rasterizer", "--disable-dev-shm-usage",
-    "--no-sandbox", "--disable-setuid-sandbox", "--disable-component-update",
+    "--disable-client-side-phishing-detection",
+    "--disable-hang-monitor",
+    "--no-sandbox", "--disable-component-update",
     "--metrics-recording-only", "--no-pings",
     "--disable-plugins-discovery", "--disable-infobars",
+    "--disable-gpu", "--disable-software-rasterizer",
+    "--disk-cache-size=0",
+    "--disable-background-timer-throttling",
   ];
 
   // ★ Load Turnstile bypass extension (world:MAIN, all_frames:true)
@@ -121,7 +123,8 @@ async function getMailToken(clientId, refreshToken, config) {
 // ========== Find Magic Link ==========
 async function findMagicLink(accessToken, afterTime, log, config) {
   // Use receivedDateTime filter to only get recent emails (reduces noise)
-  const filterTime = new Date(afterTime.getTime() - 60000).toISOString();
+  const bufferMs = 120000; // 2 minute buffer to avoid race conditions
+  const filterTime = new Date(afterTime.getTime() - bufferMs).toISOString();
   const url = (config.graphMailUrl || DEFAULT_CONFIG.graphMailUrl)
     + "?$top=10&$select=subject,body,from,receivedDateTime"
     + "&$filter=receivedDateTime ge " + encodeURIComponent(filterTime)
@@ -130,10 +133,11 @@ async function findMagicLink(accessToken, afterTime, log, config) {
   const mail = await resp.json();
   if (!mail.value || mail.value.value?.length === 0 && mail.value.length === 0) return null;
   const messages = mail.value || [];
+  const bufferedAfterTime = new Date(afterTime.getTime() - bufferMs);
 
   for (const msg of messages) {
     const recvTime = new Date(msg.receivedDateTime);
-    if (recvTime < afterTime) continue;
+    if (recvTime < bufferedAfterTime) continue;
 
     const subject = msg.subject || "";
     const fromAddr = (msg.from?.emailAddress?.address) || "";
@@ -188,7 +192,7 @@ async function findMagicLink(accessToken, afterTime, log, config) {
 // ========== Poll for Magic Link ==========
 async function pollMagicLink(email, clientId, refreshToken, afterTime, log, config) {
   let rt = refreshToken;
-  const deadline = Date.now() + 180000;
+  const deadline = Date.now() + 60000;
   let pollCount = 0;
   log("[POLL] Started, deadline: " + new Date(deadline).toLocaleTimeString());
   while (Date.now() < deadline) {
@@ -202,7 +206,13 @@ async function pollMagicLink(email, clientId, refreshToken, afterTime, log, conf
         return { link, newRefreshToken: rt };
       }
     } catch (e) {
-      log("[POLL] Error: " + e.message.substring(0, 100));
+      const errMsg = e.message || '';
+      // ★ AADSTS/Token errors are permanent — no point retrying
+      if (/AADSTS|invalid_grant|application.*not found|invalid.*refresh.token|account.*disabled/i.test(errMsg)) {
+        log("[POLL] 🚫 Permanent token error: " + errMsg.substring(0, 100));
+        throw e; // throw immediately so caller can skip this account
+      }
+      log("[POLL] Error: " + errMsg.substring(0, 100));
     }
     if (pollCount % 5 === 0) {
       const remaining = Math.round((deadline - Date.now()) / 1000);
@@ -831,10 +841,23 @@ async function registerOne(emailItem, config, log) {
       try {
         const hn = new URL(currentUrl).hostname;
         if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer' && !currentUrl.includes('/signup') && !currentUrl.includes('/email-login')) {
-          log("  ✅ Already registered! Directly at main UI: " + currentUrl);
-          alreadyRegistered = true;
-          reachedHandlePage = true;
-          break;
+          // ★ Verify page actually shows main UI, not a registration form
+          const needsReg = await page.evaluate(() => {
+            const txt = document.body.innerText || '';
+            const hasHandleInput = !!document.querySelector('input[placeholder*="you"], input[name="handle"], input[type="text"]:not([readonly])');
+            const hasRegText = /choose.*handle|create.*handle|set.*username|complete.*profile|pick.*handle/i.test(txt);
+            return hasHandleInput || hasRegText;
+          }).catch(() => false);
+          
+          if (needsReg) {
+            log("  ⚠️ Subdomain URL but needs registration (handle input detected): " + currentUrl);
+            // Don't break — fall through to handle page detection
+          } else {
+            log("  ✅ Already registered! Directly at main UI: " + currentUrl);
+            alreadyRegistered = true;
+            reachedHandlePage = true;
+            break;
+          }
         }
       } catch(e) {}
 
@@ -854,17 +877,21 @@ async function registerOne(emailItem, config, log) {
       if (/redirecting/i.test(txt)) {
         if (i % 5 === 0) log("  [" + (i * 3) + "s] Page redirecting...");
 
-        // ★ Stuck redirect recovery: after 20s, try manual confirm + navigate
-        if (i >= 7 && currentUrl.includes('email-login/verify')) {
-          log("  ★ Redirect stuck, attempting manual confirm...");
+        // ★ Stuck redirect recovery: after 60s, try manual confirm + navigate
+        // (Turnstile typically takes 20-30s to solve; don't interrupt it too early)
+        if (i >= 20 && currentUrl.includes('email-login/verify')) {
+          log("  ★ Redirect stuck after 60s, attempting manual confirm...");
           try {
             // Extract token from URL
             const tokenMatch = currentUrl.match(/token=([^&]+)/);
             if (tokenMatch) {
-              // Call confirm API from page context (sets auth cookie)
+              // Call confirm API from page context (POST — GET returns 405 now)
               const confirmResult = await page.evaluate(async (token) => {
                 try {
                   const resp = await fetch('/api/email-login/confirm?token=' + token, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+                    body: JSON.stringify({ token }),
                     credentials: 'include',
                     redirect: 'follow',
                   });
@@ -1046,92 +1073,130 @@ async function registerOne(emailItem, config, log) {
     }
 
     // Step 7: Onboarding (Terms → Go to your Zo → Phone skip → Survey → Boot → Main UI)
-    // Based on extension/content.js stepOnboardingTick logic
-    log("[7/7] Onboarding flow (up to 500s)...");
+    // ★ 智能轮询: 自适应间隔, 多维度检测, 快完成快退出, 慢就耐心等 (最长600s)
+    log("[7/7] Onboarding flow (smart adaptive poll, up to 600s)...");
     let reachedMainUI = false;
     let finalUrl = "";
+    let bootStartPct = -1;       // 上次记录的boot百分比
+    let bootLastChangeTime = 0;  // boot百分比上次变化的时间
+    let consecutiveStale = 0;    // 连续无变化次数
+    const BOOT_STALL_THRESHOLD = 90000; // boot无进展超过90秒视为卡死
 
-    for (let i = 1; i <= 100; i++) {
-      await new Promise(r => setTimeout(r, 5000));
+    const onboardingStart = Date.now();
+    const MAX_ONBOARDING = 600000; // 600秒
+
+    while (Date.now() - onboardingStart < MAX_ONBOARDING) {
+      // ★ 自适应间隔: 前30秒每1秒检查, 30-120秒每2秒, 之后每3秒
+      const elapsed = Date.now() - onboardingStart;
+      const interval = elapsed < 30000 ? 1000 : (elapsed < 120000 ? 2000 : 3000);
+      await new Promise(r => setTimeout(r, interval));
+
       const txt = await getBodyText(page, 1000);
       const url = page.url();
-      const hostname = new URL(url).hostname;
+      const hostname = (() => { try { return new URL(url).hostname; } catch(e) { return ''; } })();
       const isSubdomain = hostname.endsWith('.zo.computer') && hostname !== 'www.zo.computer';
+      const secs = Math.round(elapsed / 1000);
 
-      if (i % 5 === 0) {
-        log("  [" + (i * 5) + "s] URL: " + url.substring(0, 70) + " | Host: " + hostname);
-        log("           Text: " + txt.substring(0, 150).replace(/\n/g, " | "));
+      if (secs % 15 === 0 && secs > 0) {
+        log("  [" + secs + "s] URL: " + url.substring(0, 70) + " | Host: " + hostname);
+        log("         Text: " + txt.substring(0, 150).replace(/\n/g, " | "));
       }
 
-      // ★ Completion: reached subdomain (handle.zo.computer) with main UI
-      if (isSubdomain && /dashboard|welcome|explore|home|zo space|files|chat|your conversations/i.test(txt) && !/booting|starting|loading|%/i.test(txt)) {
-        log("  ✅ Reached ZO main interface at: " + url);
-        reachedMainUI = true;
-        finalUrl = url;
-        break;
+      // ★ Completion: smart multi-signal detection
+      if (isSubdomain) {
+        let score = 0;
+        const signals = [];
+        // Signal 1: No loading indicators
+        if (!/booting|starting|loading|preparing|creating/i.test(txt) && !txt.match(/\d+%/)) { score++; signals.push("noLoading"); }
+        // Signal 2: Sidebar items
+        if (/\bhome\b/i.test(txt) && (/\bfiles\b|automations|browser|skills|hosting|integrations|settings/i.test(txt))) { score++; signals.push("sidebar"); }
+        // Signal 3: Chat/workspace content
+        if (/dashboard|welcome|explore|zo space|your conversations|chat|new chat|GPT|claude|model|what can|how can|ask me/i.test(txt)) { score++; signals.push("chatContent"); }
+        // Signal 4: Chat input or send button (DOM check)
+        const hasInput = await page.evaluate(() => {
+          for (const el of document.querySelectorAll('textarea, [contenteditable=true]')) {
+            if (el.offsetWidth > 100 && el.offsetHeight > 0) return true;
+          }
+          for (const btn of document.querySelectorAll('button')) {
+            if (/send/i.test((btn.textContent||'').trim()) && btn.offsetWidth > 0) return true;
+          }
+          for (const el of document.querySelectorAll('[role="textbox"]')) {
+            if (el.offsetWidth > 100 && el.offsetHeight > 0) return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (hasInput) { score++; signals.push("chatInput"); }
+
+        // ★ 更智能的判定:
+        // - chatInput 单独就够 (有输入框 = 聊天界面就绪)
+        // - 或任意 2 个信号
+        const chatInputReady = signals.includes("chatInput");
+        if (chatInputReady || score >= 2) {
+          log("  ✅ Reached ZO main interface (" + secs + "s, signals: " + signals.join("+") + ")");
+          reachedMainUI = true;
+          finalUrl = url;
+          break;
+        }
       }
 
       // Handle onboarding pages in priority order:
 
-      // ⓪ "Continue to onboarding" link (still on handle/signup page after setting handle)
+      // ⓪ "Continue to onboarding" link
       if (/continue to onboarding/i.test(txt)) {
         log("  [Onboarding] 'Continue to onboarding' detected, clicking...");
         await realClickByText(page, /continue to onboarding/i);
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 3000));
+        consecutiveStale = 0;
         continue;
       }
 
-      // ① Terms of Use / 18 years checkbox (require actual checkbox UI or explicit terms page)
-      // ★ Only match if page has checkbox/toggle elements OR explicitly says "terms of use" as heading
+      // ① Terms of Use / 18 years checkbox
       const hasCheckboxUI = await page.evaluate(() => {
         return document.querySelectorAll('input[type=checkbox], [role=checkbox], [role=switch], .checkbox, .toggle-switch').length > 0;
       }).catch(() => false);
       if (hasCheckboxUI && /terms|agree|privacy|18.*years/i.test(txt)) {
-        log("  [Onboarding] Terms/checkbox page detected (has checkbox UI)");
-        // ★ Puppeteer native: find unchecked checkboxes, get coords, click
+        log("  [Onboarding] Terms/checkbox page detected");
         const cbCoords = await page.evaluate(() => {
           const results = [];
           for (const cb of document.querySelectorAll('input[type=checkbox]')) {
             if (!cb.checked) {
               const rect = cb.getBoundingClientRect();
-              if (rect.width > 0 && rect.height > 0) {
-                results.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-              }
-              // Also check parent label
+              if (rect.width > 0 && rect.height > 0) results.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
               const label = cb.closest('label');
-              if (label) {
-                const lr = label.getBoundingClientRect();
-                if (lr.width > 0 && lr.height > 0) results.push({ x: lr.left + lr.width / 2, y: lr.top + lr.height / 2 });
-              }
+              if (label) { const lr = label.getBoundingClientRect(); if (lr.width > 0 && lr.height > 0) results.push({ x: lr.left + lr.width / 2, y: lr.top + lr.height / 2 }); }
             }
           }
           return results;
         });
-        for (const c of cbCoords) {
-          await page.mouse.click(c.x, c.y);
-          await new Promise(r => setTimeout(r, 300));
-        }
+        for (const c of cbCoords) { await page.mouse.click(c.x, c.y); await new Promise(r => setTimeout(r, 300)); }
         await new Promise(r => setTimeout(r, 1000));
         await realClickByText(page, /skip\s*for\s*now|skip|continue/i);
+        consecutiveStale = 0;
         continue;
       }
 
       // ② Go to your Zo / Get Started / Continue to your Zo
       if (/go to your zo|get started|continue to your/i.test(txt)) {
         const urlBefore = page.url();
-        log("  [Onboarding] 'Go to your Zo' detected — Puppeteer native click...");
+        log("  [Onboarding] 'Go to your Zo' detected — clicking...");
         const clicked = await realClickByText(page, /go to your zo|get\s*started|continue to your/i);
         log("  [Onboarding] Click result: " + (clicked ? "OK" : "FAILED"));
-        // Wait for navigation or new tab
-        await new Promise(r => setTimeout(r, 10000));
-        // Check for popup page first (from targetcreated listener)
-        if (popupPage && popupPage.url().startsWith('http') && !popupPage.url().includes('/signup')) {
-          page = popupPage;
-          popupPage = null;
-          log("  ★ Switched to popup page: " + page.url().substring(0, 70));
-          await page.bringToFront();
-        } else {
-          // Check for new tabs
+        // ★ 自适应等待: 先等3秒，然后每秒检查是否已经开始跳转/boot
+        await new Promise(r => setTimeout(r, 3000));
+        for (let navWait = 0; navWait < 12; navWait++) {
+          const navUrl = page.url();
+          const navTxt = await getBodyText(page, 500);
+          if (navUrl !== urlBefore || /booting|starting|loading|preparing|%/i.test(navTxt)) {
+            log("  [Onboarding] Navigation detected: " + navUrl.substring(0, 60));
+            break;
+          }
+          // Check for popup/new tab
+          if (popupPage && popupPage.url().startsWith('http') && !popupPage.url().includes('/signup')) {
+            page = popupPage; popupPage = null;
+            log("  ★ Switched to popup: " + page.url().substring(0, 70));
+            await page.bringToFront();
+            break;
+          }
           const allPages = await browser.pages();
           for (const p of allPages) {
             const pUrl = p.url();
@@ -1142,12 +1207,9 @@ async function registerOne(emailItem, config, log) {
               break;
             }
           }
+          await new Promise(r => setTimeout(r, 1000));
         }
-        if (page.url() !== urlBefore) {
-          log("  URL changed to: " + page.url().substring(0, 70));
-        } else {
-          log("  URL unchanged after click: " + page.url().substring(0, 70));
-        }
+        consecutiveStale = 0;
         continue;
       }
 
@@ -1157,38 +1219,76 @@ async function registerOne(emailItem, config, log) {
         if (!await realClickByText(page, /skip|not now|maybe later/i)) {
           await realClickByText(page, /^Continue$/i);
         }
+        consecutiveStale = 0;
         continue;
       }
 
       // ④ Survey / preference selection
       if (/what.*(interest|prefer|use)|select.*(interest|preference)|choose.*(interest)|tell us/i.test(txt)) {
         log("  [Onboarding] Survey detected, picking random option...");
-        // ★ Puppeteer native: get clickable option coords, click randomly
         const optCoords = await page.evaluate(() => {
           const opts = [];
           for (const sel of ['button', 'div[role=button]', 'label', '[class*=option]']) {
             for (const el of document.querySelectorAll(sel)) {
               const rect = el.getBoundingClientRect();
-              if (rect.width > 0 && rect.height > 0 && el.textContent.trim().length > 0) {
-                opts.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-              }
+              if (rect.width > 0 && rect.height > 0 && el.textContent.trim().length > 0) opts.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
             }
           }
           return opts;
         });
-        if (optCoords.length > 0) {
-          const pick = optCoords[Math.floor(Math.random() * optCoords.length)];
-          await page.mouse.click(pick.x, pick.y);
-        }
+        if (optCoords.length > 0) { const pick = optCoords[Math.floor(Math.random() * optCoords.length)]; await page.mouse.click(pick.x, pick.y); }
         await new Promise(r => setTimeout(r, 1500));
         await realClickByText(page, /continue|next|skip|done/i);
+        consecutiveStale = 0;
         continue;
       }
 
-      // ⑤ Boot loading (percentage / booting)
+      // ⑤ Boot loading (percentage / booting) — 追踪进度，检测卡死
       const pct = txt.match(/(\d+\.?\d*)%/);
       if (/booting|starting|loading|preparing|creating/i.test(txt) || pct) {
-        if (pct && i % 10 === 0) log("  Boot: " + pct[1] + "%");
+        if (pct) {
+          const pctNum = parseFloat(pct[1]);
+          if (pctNum !== bootStartPct) {
+            // 百分比有变化，重置计时器
+            bootStartPct = pctNum;
+            bootLastChangeTime = Date.now();
+            consecutiveStale = 0;
+            log("  Boot: " + pctNum + "% (" + secs + "s)");
+          } else if (bootLastChangeTime > 0 && Date.now() - bootLastChangeTime > BOOT_STALL_THRESHOLD) {
+            // 百分比超过90秒没变化 → 可能卡死
+            log("  ⚠️ Boot stalled at " + pctNum + "% for " + Math.round((Date.now() - bootLastChangeTime) / 1000) + "s");
+            // 给最后一次机会：检查页面是否已经有聊天界面
+            const stallUrl = page.url();
+            const stallHost = (() => { try { return new URL(stallUrl).hostname; } catch(e) { return ''; } })();
+            if (stallHost.endsWith('.zo.computer') && stallHost !== 'www.zo.computer') {
+              const stallHasInput = await page.evaluate(() => {
+                for (const el of document.querySelectorAll('textarea, [contenteditable=true], [role="textbox"]')) {
+                  if (el.offsetWidth > 100 && el.offsetHeight > 0) return true;
+                }
+                return false;
+              }).catch(() => false);
+              if (stallHasInput) {
+                log("  ✅ Chat interface found despite stalled boot indicator!");
+                reachedMainUI = true;
+                finalUrl = stallUrl;
+                break;
+              }
+            }
+            // 确认卡死，尝试刷新
+            log("  🔄 Attempting page reload to recover...");
+            try { await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 }); } catch(e) {}
+            bootLastChangeTime = Date.now(); // 重置计时器
+            bootStartPct = -1;
+            await new Promise(r => setTimeout(r, 5000));
+            continue;
+          }
+          if (secs % 10 === 0) log("  Boot: " + pctNum + "% (" + secs + "s)");
+        } else {
+          // 有 booting/starting 文字但没有百分比
+          if (bootLastChangeTime === 0) bootLastChangeTime = Date.now();
+          if (secs % 10 === 0) log("  Boot: waiting... (" + secs + "s)");
+        }
+        consecutiveStale = 0;
         continue;
       }
 
@@ -1196,18 +1296,22 @@ async function registerOne(emailItem, config, log) {
       if (/set up your profile|display name/i.test(txt)) {
         log("  [Onboarding] Profile fallback, clicking Continue...");
         await realClickByText(page, /continue|skip/i);
+        consecutiveStale = 0;
         continue;
       }
 
-      // ⑦ Generic Continue/Skip fallback (catch-all for unrecognized onboarding pages)
+      // ❼ Generic Continue/Skip fallback — 最多点3次，避免误操作
       if (/continue|skip|next/i.test(txt) && !/booting|starting|loading|%/i.test(txt)) {
-        log("  [Onboarding] Generic fallback: clicking Continue/Skip/Next...");
-        if (!await realClickByText(page, /continue/i)) {
-          if (!await realClickByText(page, /skip/i)) {
-            await realClickByText(page, /next/i);
+        consecutiveStale++;
+        if (consecutiveStale <= 3) {
+          log("  [Onboarding] Generic fallback (#" + consecutiveStale + "): clicking Continue/Skip...");
+          if (!await realClickByText(page, /continue/i)) {
+            if (!await realClickByText(page, /skip/i)) {
+              await realClickByText(page, /next/i);
+            }
           }
+          await new Promise(r => setTimeout(r, 3000));
         }
-        await new Promise(r => setTimeout(r, 3000));
         continue;
       }
 
@@ -1221,13 +1325,12 @@ async function registerOne(emailItem, config, log) {
       const finalTxt = await getBodyText(page, 800);
       finalUrl = page.url();
       log("  ⚠️ Onboarding timeout. URL: " + finalUrl + " | Text: " + finalTxt.substring(0, 200));
-      // Even if not at main UI, try token retrieval if we're at a subdomain
-      const hn = new URL(finalUrl).hostname;
+      const hn = (() => { try { return new URL(finalUrl).hostname; } catch(e) { return ''; } })();
       if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer') {
         log("  ★ At subdomain, attempting token retrieval anyway...");
         reachedMainUI = true;
       } else {
-        throw new Error("Onboarding timeout (500s)");
+        throw new Error("Onboarding timeout (" + Math.round(MAX_ONBOARDING/1000) + "s)");
       }
     }
 

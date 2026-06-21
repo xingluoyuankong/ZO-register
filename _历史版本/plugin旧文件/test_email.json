@@ -1,0 +1,7 @@
+{
+  "email": "zotestqw5c3jbk@web-library.net",
+  "provider": "mailtm",
+  "credentials": {
+    "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpYXQiOjE3ODIwMDIwNjIsInJvbGVzIjpbIlJPTEVfVVNFUiJdLCJhZGRyZXNzIjoiem90ZXN0cXc1YzNqYmtAd2ViLWxpYnJhcnkubmV0IiwiaWQiOiI2YTM3MzE4ZDBkNThhMTdmMDEwYjkyMTAiLCJtZXJjdXJlIjp7InN1YnNjcmliZSI6WyIvYWNjb3VudHMvNmEzNzMxOGQwZDU4YTE3ZjAxMGI5MjEwIl19fQ.p7ecr-VF_AcmJUgi-I1hlM4_MdWoSiq8xwh0layX2ormGVbFGapE7va18cigma5xDsV-k1-Vr3YNunUazk9d7Q"
+  }
+}

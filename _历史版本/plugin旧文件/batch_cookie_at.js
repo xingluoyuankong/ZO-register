@@ -19,8 +19,33 @@ const ZO_FILE = path.join("C:\\Users\\XZXyuan\\Downloads", "100个Outlook邮箱.
 const REGISTERED_DIR = path.join(__dirname, "..", "registered");
 const COOKIE_AT_DIR = path.join(REGISTERED_DIR, "Cookie ATs");
 const RESULTS_FILE = path.join(REGISTERED_DIR, "cookie_at_results.jsonl");
-const MAX_BROWSERS = 4;
+const MAX_BROWSERS = 3;  // ★ 降低到 3 减少资源占用
 const MAX_RETRIES = 2;
+
+// ★ 进程监控（每 60 秒检查 Edge 进程数）
+let processMonitorInterval = null;
+function startProcessMonitor() {
+  if (processMonitorInterval) return;
+  processMonitorInterval = setInterval(() => {
+    try {
+      const { execSync } = require("child_process");
+      const output = execSync("tasklist /FI \"IMAGENAME eq msedge.exe\" /NH", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const count = (output.match(/msedge\.exe/gi) || []).length;
+      if (count > 50) {
+        console.log(`\n⚠️ Edge 进程过多 (${count})，清理孤立进程...`);
+        try { execSync("taskkill /F /IM msedge.exe 2>nul", { stdio: "ignore" }); } catch(e) {}
+      } else {
+        console.log(`[监控] Edge 进程数: ${count}`);
+      }
+    } catch(e) {}
+  }, 60000);
+}
+function stopProcessMonitor() {
+  if (processMonitorInterval) {
+    clearInterval(processMonitorInterval);
+    processMonitorInterval = null;
+  }
+}
 
 // ===== Pre-flight cleanup =====
 function preflightCleanup() {
@@ -220,6 +245,7 @@ async function main() {
   if (mode === "single") {
     // Single mode: test first account
     console.log("=== Single Test Mode ===\n");
+    startProcessMonitor();
     const result = await worker(todo[0], 1, todo.length);
     console.log("\nResult:", JSON.stringify(result, null, 2));
 
@@ -230,6 +256,7 @@ async function main() {
   } else if (mode === "parallel") {
     const concurrency = Math.min(parseInt(process.argv[3]) || MAX_BROWSERS, MAX_BROWSERS);
     console.log(`=== Parallel Mode (${concurrency} concurrent) ===\n`);
+    startProcessMonitor();
 
     const results = [];
     const promises = [];
@@ -276,6 +303,7 @@ async function main() {
   }
 
   // Final cleanup
+  stopProcessMonitor();
   try { execSync("taskkill /F /IM msedge.exe 2>nul", { stdio: "ignore" }); } catch(e) {}
 }
 

@@ -8,25 +8,39 @@
  * 4. 先单线程验证，再多线程并行
  */
 
+// Global error handlers to catch unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Rejection:', reason?.message || reason);
+  console.error('[FATAL] Stack:', reason?.stack || 'no stack');
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught Exception:', err.message);
+  console.error('[FATAL] Stack:', err.stack);
+  process.exit(1);
+});
+
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 const { launchBrowser, fetchAccessToken, getMailToken, findMagicLink, pollMagicLink } = require("./zo_register");
 
-// ===== Pre-flight cleanup =====
+// ===== Pre-flight cleanup (only script-started browsers) =====
+// NOTE: Does NOT kill ALL browsers — only orphaned ones from previous script runs
+let scriptLaunchedPids = [];  // Track PIDs of browsers launched by this script
+
 function preflightCleanup() {
-  // Kill orphaned browser processes
-  try { execSync("taskkill /F /IM msedge.exe 2>nul", { stdio: "ignore" }); } catch(e) {}
-  try { execSync("taskkill /F /IM chrome.exe 2>nul", { stdio: "ignore" }); } catch(e) {}
-  // Remove leftover temp dirs
+  // Only clean up leftover temp dirs from previous runs
+  // Do NOT kill all browser processes — that was destroying user's own browsers
   const tmpBase = path.join("E:\\Openclaw\\tmp");
   if (fs.existsSync(tmpBase)) {
     const dirs = fs.readdirSync(tmpBase).filter(d => d.startsWith("zo_reg_"));
     for (const d of dirs) {
       try { fs.rmSync(path.join(tmpBase, d), { recursive: true, force: true }); } catch(e) {}
     }
-    console.log(`Cleaned ${dirs.length} orphaned temp dirs`);
+    if (dirs.length > 0) console.log("Cleaned " + dirs.length + " orphaned temp dirs");
   }
+  scriptLaunchedPids = [];
 }
 
 // ===== Aggressive temp dir cleanup (retries) =====
@@ -41,7 +55,7 @@ function cleanupTempDir(tempDir) {
 }
 
 // ===== Browser count enforcement =====
-const MAX_BROWSERS = 4;
+const MAX_BROWSERS = 5;
 let activeBrowsers = 0;
 const browserQueue = [];
 let browserQueueResolve = null;
@@ -68,10 +82,11 @@ function releaseBrowserSlot() {
 
 preflightCleanup();
 
-const ZO_FILE = path.join("C:\\Users\\XZXyuan\\Downloads", "zo.txt");
+const ZO_FILE = path.join("C:\\Users\\XZXyuan\\Downloads", "zo_all.txt");
 const REGISTERED_DIR = path.join(__dirname, "..", "registered");
 const AT_DIR = path.join(REGISTERED_DIR, "Access Tokens");
 const RESULTS_FILE = path.join(REGISTERED_DIR, "at_results.jsonl");
+const BLOCKED_FILE = path.join(REGISTERED_DIR, "blocked_accounts.txt");
 
 // ===== Parse zo.txt =====
 function parseAccounts(filePath) {
@@ -84,10 +99,13 @@ function parseAccounts(filePath) {
     const email = parts[0].trim();
     if (!email || seen.has(email)) continue;
     seen.add(email);
+    // Fix: strip leading hyphen from clientId (data corruption)
+    const rawClientId = parts[2].trim();
+    const clientId = rawClientId.replace(/^-+/, '');
     accounts.push({
       email,
       password: parts[1].trim(),
-      clientId: parts[2].trim(),
+      clientId,
       refreshToken: parts[3].trim(),
     });
   }
@@ -99,6 +117,258 @@ function getExistingATs() {
   if (!fs.existsSync(AT_DIR)) return new Set();
   const files = fs.readdirSync(AT_DIR);
   return new Set(files.map(f => f.replace(".txt", "")));
+}
+
+// ===== Dynamic AT check (per-attempt) =====
+function hasAT(email) {
+  return fs.existsSync(path.join(AT_DIR, email + ".txt"));
+}
+
+// ===== Load blocked accounts =====
+function loadBlockedAccounts() {
+  if (!fs.existsSync(BLOCKED_FILE)) return new Set();
+  const lines = fs.readFileSync(BLOCKED_FILE, "utf8").split("\n").filter(l => l.trim());
+  return new Set(lines.map(l => l.trim()));
+}
+
+// ===== Error classification =====
+function classifyError(errorMsg) {
+  if (/AADSTS70000|service abuse|account.*locked|account.*disabled/i.test(errorMsg)) return "blocked";
+  if (/Cannot determine ZO handle/i.test(errorMsg)) return "permanent";
+  if (/Cannot find email button/i.test(errorMsg)) return "permanent";
+  if (/Email not sent/i.test(errorMsg)) return "permanent";
+  if (/ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|net::ERR/i.test(errorMsg)) return "transient";
+  if (/timeout|Navigation timeout/i.test(errorMsg)) return "transient";
+  if (/No magic link found/i.test(errorMsg)) return "transient";
+  if (/Failed to get access token/i.test(errorMsg)) return "transient";
+  if (/ZO space did not boot/i.test(errorMsg)) return "transient";
+  return "transient";
+}
+
+// ===== Complete registration (set handle when on /signup page) =====
+async function completeRegistration(page, email, log) {
+  log("[REG] Completing registration (setting handle)...");
+  // Generate unique handle with random suffix to avoid conflicts
+  const baseHandle = email.split("@")[0].substring(0, 5).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const randSuffix = Math.random().toString(36).substring(2, 5);
+  const handle = baseHandle + randSuffix;
+  log("[REG] Handle: " + handle);
+  
+  // ★ First check: maybe the page already redirected to workspace (account was already registered)
+  await new Promise(r => setTimeout(r, 3000));  // Brief wait for any pending redirects
+  let currentUrl = page.url();
+  log("[REG] Current URL after redirect: " + currentUrl);
+  
+  // Check if already on workspace (subdomain.zo.computer)
+  const urlMatch = currentUrl.match(/https?:\/\/([^.]+)\.zo\.computer/);
+  if (urlMatch && urlMatch[1] !== 'www' && urlMatch[1] !== 'app') {
+    const actualHandle = urlMatch[1];
+    log("[REG] ✅ Already on workspace: " + actualHandle + ".zo.computer (account already registered)");
+    return actualHandle;
+  }
+  
+  // Still on /signup, need to complete registration
+  log("[REG] Still on /signup, polling for form to render...");
+  let handleInput = null;
+  for (let i = 0; i < 300; i++) {  // 5 minutes max
+    await new Promise(r => setTimeout(r, 1000));
+    
+    // Check URL again (might have redirected during polling)
+    currentUrl = page.url();
+    const urlMatch2 = currentUrl.match(/https?:\/\/([^.]+)\.zo\.computer/);
+    if (urlMatch2 && urlMatch2[1] !== 'www' && urlMatch2[1] !== 'app') {
+      log("[REG] ✅ Redirected to workspace during wait: " + urlMatch2[1] + ".zo.computer");
+      return urlMatch2[1];
+    }
+    
+    try {
+      handleInput = await page.$("input[placeholder='you']");
+      if (!handleInput) handleInput = await page.$("input[name='handle']");
+      if (!handleInput) handleInput = await page.$("input[type=text]:not([readonly])");
+      if (!handleInput) {
+        const found = await page.evaluate(() => {
+          const inputs = Array.from(document.querySelectorAll('input'));
+          for (const inp of inputs) {
+            if (inp.offsetWidth > 0 && inp.offsetHeight > 0 && (!inp.type || inp.type === 'text' || inp.type === 'username')) {
+              return true;
+            }
+          }
+          return false;
+        });
+        if (found) handleInput = await page.$("input:visible");
+      }
+    } catch(e) { /* context may be destroyed, retry */ }
+    
+    if (handleInput) {
+      log("[REG] ✅ Handle input found after " + i + "s");
+      break;
+    }
+    
+    if (i % 15 === 0 && i > 0) {
+      const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => "");
+      log("[REG] Still waiting for form... (" + i + "s) URL: " + currentUrl.substring(0, 60) + " | " + bodySnippet.substring(0, 80).replace(/\n/g, ' '));
+    }
+  }
+  if (!handleInput) { log("[REG] ❌ Handle input not found after 5 minutes"); return null; }
+  
+  // Fill handle with realistic typing
+  try {
+    await handleInput.click({ clickCount: 3 });
+    await new Promise(r => setTimeout(r, 200));
+    await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+    for (const ch of handle) { await page.keyboard.type(ch, { delay: 80 + Math.random() * 60 }); }
+    log("[REG] Handle filled: " + handle);
+  } catch(e) {
+    try { await handleInput.click({ clickCount: 3 }); await handleInput.type(handle, { delay: 50 }); } catch(e2) {}
+    log("[REG] Handle filled (fallback)");
+  }
+  await new Promise(r => setTimeout(r, 500));
+  
+  // Click Continue via direct DOM click (more reliable than mouse coordinates)
+  // ★ Take screenshot before clicking for debugging
+  try {
+    await page.screenshot({ path: 'E:\\API\u83b7\u53d6\u5de5\u5177\\ZO\u6ce8\u518c\\plugin\\debug_before_continue.png', fullPage: true });
+    log("[REG] Screenshot saved: debug_before_continue.png");
+  } catch(e) {}
+  log("[REG] Clicking Continue...");
+  let clicked = false;
+  for (let a = 0; a < 8 && !clicked; a++) {
+    // Try multiple click strategies via page.evaluate
+    const clickResult = await page.evaluate(() => {
+      for (const btn of document.querySelectorAll('button, [role="button"], input[type="submit"]')) {
+        const txt = (btn.textContent || btn.value || '').trim();
+        if (/continue|submit|sign.?up|create|get.?started|set.?up|next/i.test(txt) && btn.offsetWidth > 0 && btn.offsetHeight > 0) {
+          // Strategy 1: direct click()
+          btn.click();
+          // Strategy 2: dispatch MouseEvent for React
+          btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          // Strategy 3: also try form.submit if inside a form
+          const form = btn.closest('form');
+          if (form) { try { form.requestSubmit(); } catch(e) {} }
+          return { txt };
+        }
+      }
+      return null;
+    }).catch(() => null);
+    if (clickResult) {
+      log("[REG] Clicked button: '" + clickResult.txt + "' (attempt " + (a+1) + ", DOM click+dispatch)");
+      clicked = true;
+      // Wait briefly to see if page reacts
+      await new Promise(r => setTimeout(r, 3000));
+      // Check if we left /signup or if Turnstile/error appeared
+      const afterUrl = page.url();
+      // ★ Screenshot after click for debugging
+      try {
+        await page.screenshot({ path: 'E:\\API\u83b7\u53d6\u5de5\u5177\\ZO\u6ce8\u518c\\plugin\\debug_after_continue.png', fullPage: true });
+      } catch(e) {}
+      if (afterUrl !== currentUrl || !/signup/i.test(afterUrl)) {
+        log("[REG] Page navigated after click: " + afterUrl.substring(0, 80));
+        break;
+      }
+      // Check for Turnstile or error
+      const afterTxt = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => "");
+      if (/turnstile|challenge|verif/i.test(afterTxt)) {
+        log("[REG] ⚠️ Turnstile/challenge appeared after click, waiting...");
+        // Wait for Turnstile to auto-solve
+        for (let t = 0; t < 30; t++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const u = page.url();
+          if (!/signup|verify|email-login/i.test(u) && /zo\.computer/.test(u)) {
+            log("[REG] ✅ Redirected after Turnstile: " + u.substring(0, 80));
+            return handle;
+          }
+          const ttxt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
+          if (!/turnstile|challenge/i.test(ttxt)) break;
+        }
+      }
+      if (/error|taken|invalid|already.?exists/i.test(afterTxt)) {
+        log("[REG] ⚠️ Validation error: " + afterTxt.substring(0, 150));
+        // If handle taken, try generating a new one
+        if (/taken|already|exists/i.test(afterTxt) && a < 5) {
+          const newHandle = baseHandle + Math.random().toString(36).substring(2, 6);
+          log("[REG] Handle might be taken, trying: " + newHandle);
+          await page.evaluate((h) => {
+            const inp = document.querySelector('input[placeholder*="you"], input[name="handle"], input[type="text"]:not([readonly])');
+            if (inp) { 
+              inp.focus(); inp.value = ''; 
+              inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.value = h; 
+              inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }, newHandle).catch(() => {});
+          await new Promise(r => setTimeout(r, 1000));
+          clicked = false; // retry click with new handle
+        }
+      }
+    } else {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  // Fallback: try mouse click at button coordinates
+  if (!clicked || /signup/i.test(page.url())) {
+    log("[REG] Trying mouse click fallback...");
+    const btnPos = await page.evaluate(() => {
+      for (const btn of document.querySelectorAll('button, [role="button"], input[type="submit"]')) {
+        const txt = (btn.textContent || btn.value || '').trim();
+        if (/continue|submit|sign.?up|create|next/i.test(txt) && btn.offsetWidth > 0) {
+          const r = btn.getBoundingClientRect();
+          return { x: r.left + r.width/2, y: r.top + r.height/2 };
+        }
+      }
+      return null;
+    }).catch(() => null);
+    if (btnPos) {
+      await page.mouse.click(btnPos.x, btnPos.y, { delay: 100 });
+      log("[REG] Mouse click at (" + Math.round(btnPos.x) + ", " + Math.round(btnPos.y) + ")");
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  // Fallback: try Enter key
+  if (/signup/i.test(page.url())) {
+    log("[REG] Trying Enter key as fallback...");
+    try { await page.keyboard.press('Enter'); } catch(e) {}
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  
+  // Wait for redirect away from /signup (poll URL, not hard waits)
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const url = page.url();
+      if (/zo\.computer/.test(url) && !/signup|verify|email-login/i.test(url)) {
+        try { const hn = new URL(url).hostname;
+          if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer') {
+            log("[REG] ✅ Redirected to workspace: " + url.substring(0, 80)); return handle;
+          }
+        } catch(e) {}
+        log("[REG] ✅ Redirected: " + url.substring(0, 80)); return handle;
+      }
+      const txt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
+      if (/home|files|automations|skills|browser|hosting|zospace/i.test(txt) && !/sign.?up|email.login|verify/i.test(txt)) {
+        log("[REG] ✅ Workspace detected!"); return handle;
+      }
+    } catch(e) {}
+  }
+  
+  // Try direct nav to handle subdomain
+  log("[REG] Trying direct nav to " + handle + ".zo.computer...");
+  for (let r = 0; r < 3; r++) {
+    try {
+      await page.goto("https://" + handle + ".zo.computer/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await new Promise(r => setTimeout(r, 5000));
+      const u = page.url();
+      if (u.includes(handle + ".zo.computer")) { log("[REG] ✅ Direct nav OK"); return handle; }
+      try { const hn = new URL(u).hostname;
+        if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer') { log("[REG] ✅ On workspace"); return handle; }
+      } catch(e) {}
+    } catch(e) { log("[REG] Nav " + (r+1) + " failed: " + e.message.substring(0, 40)); }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  
+  log("[REG] ⚠️ Handle set but redirect unconfirmed: " + handle);
+  return handle;
 }
 
 // ===== Login + Get AT for one account =====
@@ -122,18 +392,39 @@ async function loginAndGetAT(account, config, log) {
     // === Step 1: Open signup/login page ===
     log("[1/5] Opening ZO login page...");
     await page.goto("https://www.zo.computer/signup", { waitUntil: "domcontentloaded", timeout: 45000 });
-    await new Promise(r => setTimeout(r, 2000));
+    // Poll for page to be interactive instead of hard 2s wait
+    for (let i = 0; i < 15; i++) {
+      const ready = await page.evaluate(() => document.readyState).catch(() => "loading");
+      const hasBtn = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('button')) {
+          if (/Email me a sign-up link/i.test((b.textContent || '').trim()) || /sign.?up|log.?in/i.test((b.textContent || '').trim())) return true;
+        }
+        return false;
+      }).catch(() => false);
+      if (ready === "complete" && hasBtn) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
 
     // === Step 2: Click "Email me a sign-up link" === robust retry
     log("[2/5] Clicking email button...");
     let clicked = false;
     for (let attempt = 0; attempt < 10 && !clicked; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 3000));
-      const ready = await page.evaluate(() => document.readyState).catch(() => "unknown");
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+      
+      // Diagnostic: log page URL and title
+      const diagUrl = page.url();
+      const diagTitle = await page.title().catch(() => "error");
+      
+      const ready = await page.evaluate(() => document.readyState).catch((e) => {
+        log("  [DIAG] evaluate error: " + e.message.substring(0, 80));
+        return "unknown";
+      });
+      
       if (ready !== "complete" && ready !== "interactive") {
-        log("  Page not ready (" + ready + "), waiting... (attempt " + (attempt+1) + ")");
+        log("  Page not ready (" + ready + "), URL: " + diagUrl.substring(0, 60) + ", title: " + diagTitle);
         continue;
       }
+      
       const btns = await page.$$("button");
       for (const btn of btns) {
         const txt = await btn.evaluate(e => e.textContent).catch(() => "");
@@ -144,7 +435,7 @@ async function loginAndGetAT(account, config, log) {
         }
       }
       if (!clicked && attempt >= 2) {
-        log("  Button not found yet (attempt " + (attempt+1) + "/10)");
+        log("  Button not found yet (attempt " + (attempt+1) + "/10), found " + btns.length + " buttons");
       }
     }
     if (!clicked) throw new Error("Cannot find email button after 10 attempts");
@@ -178,14 +469,22 @@ async function loginAndGetAT(account, config, log) {
       if (/^Continue$/i.test(txt)) { await btn.click(); break; }
     }
 
-    // Wait for confirmation
+    // Wait for confirmation (poll until page shows success message)
     let emailSent = false;
     for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1000));
       const txt = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => "");
-      if (/check your email|login link/i.test(txt)) { emailSent = true; break; }
+      if (/check your email|login link|magic link/i.test(txt)) { emailSent = true; break; }
+      // Log page content periodically to diagnose what's shown
+      if (i % 5 === 4) {
+        log("  [DIAG] Page text after Continue: " + txt.substring(0, 120).replace(/\n/g, ' '));
+      }
     }
-    if (!emailSent) throw new Error("Email not sent");
+    if (!emailSent) {
+      const finalTxt = await page.evaluate(() => document.body.innerText).catch(() => "");
+      log("  [DIAG] Final page text: " + finalTxt.substring(0, 300).replace(/\n/g, ' '));
+      throw new Error("Email not sent");
+    }
     log("  Email sent!");
 
     // === Step 4: Get magic link via Graph API ===
@@ -197,21 +496,217 @@ async function loginAndGetAT(account, config, log) {
 
     // === Step 5: Open magic link → login → boot → settings → AT ===
     log("[5/5] Opening magic link...");
-    await page.goto(result.link, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await new Promise(r => setTimeout(r, 5000));
+    // ★ DO NOT clear cookies — they carry the session needed for redirect
+    const preNavUrl = page.url();
+    let navOk = false;
+    for (let navRetry = 0; navRetry < 3; navRetry++) {
+      try {
+        await page.goto(result.link, { waitUntil: "domcontentloaded", timeout: 60000 });
+        navOk = true;
+        break;
+      } catch(navErr) {
+        if (/timeout/i.test(navErr.message)) {
+          log("  Navigation timeout, continuing...");
+          navOk = true;
+          break;
+        } else if (/net::ERR_/i.test(navErr.message)) {
+          throw new Error("Network error opening link: " + navErr.message);
+        } else if (/detached|destroyed|disposed/i.test(navErr.message)) {
+          log("  Nav error (detached frame), retry " + (navRetry+1) + "/3...");
+          await new Promise(r => setTimeout(r, 3000));
+          try { const pages = await browser.pages(); if (pages.length > 0) page = pages[pages.length - 1]; } catch(e) {}
+        } else {
+          log("  Nav error: " + navErr.message.substring(0, 60) + ", continuing...");
+          navOk = true;
+          break;
+        }
+      }
+    }
+    // Verify page actually navigated to the magic link
+    await new Promise(r => setTimeout(r, 2000));
+    if (!page.url().includes('email-login/verify') && !page.url().includes('/signup') && page.url() === preNavUrl) {
+      log("  ⚠️ Page didn't navigate, retrying...");
+      try { await page.goto(result.link, { waitUntil: "domcontentloaded", timeout: 60000 }); } catch(e) { log("  Retry failed: " + e.message.substring(0, 60)); }
+    }
+    // Give the page a moment to start Turnstile, then poll
+    await new Promise(r => setTimeout(r, 1000));
 
-    // Wait for verify redirect to complete
-    for (let i = 0; i < 30; i++) {
+    // Step 5b: Wait for Turnstile auto-solve + auto-redirect
+    // ★ Turnstile extension (world:MAIN, all_frames:true) auto-bypasses CAPTCHA
+    // ★ NO button clicks — page auto-redirects after Turnstile passes
+    log("  Waiting for Turnstile auto-solve + redirect (NO clicks)...");
+    let redirectDone = false;
+    const startVerifyUrl = page.url();
+    for (let i = 0; i < 60; i++) {
+      const txt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
       const url = page.url();
-      if (/zo\.computer/.test(url) && !/verify|email-login/i.test(url)) {
-        log("  ✅ Login redirect done: " + url.substring(0, 80));
+
+      // ★ Check if we landed on main UI (already registered)
+      try {
+        const hn = new URL(url).hostname;
+        if (hn.endsWith('.zo.computer') && hn !== 'www.zo.computer' && !url.includes('/signup') && !url.includes('/email-login')) {
+          // ★ But verify the page actually shows main UI, not a registration form
+          const needsReg = await page.evaluate(() => {
+            const txt = document.body.innerText || '';
+            const hasHandleInput = !!document.querySelector('input[placeholder*="you"], input[name="handle"], input[type="text"]:not([readonly])');
+            const hasRegText = /choose.*handle|create.*handle|set.*username|complete.*profile|pick.*handle/i.test(txt);
+            return hasHandleInput || hasRegText;
+          }).catch(() => false);
+          
+          if (needsReg) {
+            log("  ⚠️ Subdomain URL but needs registration (handle input detected): " + url);
+            // Don't break - let it fall through to registration handling below
+          } else {
+            log("  ✅ Already registered! Directly at main UI: " + url);
+            redirectDone = true;
+            break;
+          }
+        }
+      } catch(e) {}
+
+      // Check if we reached a non-verify page (but URL must have changed from pre-nav)
+      if (/zo\.computer/.test(url) && !/verify|email-login/i.test(url) && url !== preNavUrl) {
+        log("  ✅ Redirect done (" + (i*3) + "s): " + url.substring(0, 80));
+        redirectDone = true;
         break;
       }
-      await new Promise(r => setTimeout(r, 2000));
+
+      // ★ Check if we're on /signup with registration form (redirect completed back to signup)
+      if (/\/signup/i.test(url) && !/email-login|verify/i.test(url)) {
+        const hasRegForm = /choose.*handle|set up.*computer|handle.*zo\.computer/i.test(txt);
+        const hasHandleInput = await page.evaluate(() => {
+          return !!document.querySelector('input[placeholder*="you"], input[name="handle"]');
+        }).catch(() => false);
+        if (hasRegForm || hasHandleInput) {
+          log("  ✅ Redirected to signup page with registration form (" + (i*3) + "s)");
+          redirectDone = true;
+          break;
+        }
+      }
+
+      // Check for expired/invalid link
+      if (/invalid|expired/i.test(txt) && !/redirecting|verif|turnstile|challenge/i.test(txt)) {
+        throw new Error("Invalid or expired login link");
+      }
+
+      // Monitor redirect progress
+      if (/redirecting/i.test(txt)) {
+        if (i % 5 === 0) log("  [" + (i*3) + "s] Page redirecting...");
+
+        // ★ Stuck redirect recovery: after 60s, try manual confirm + navigate
+        // (Turnstile typically takes 20-30s to solve; don't interrupt it too early)
+        if (i >= 20 && url.includes('email-login/verify')) {
+          log("  ★ Redirect stuck after 60s, attempting manual confirm...");
+          try {
+            const tokenMatch = url.match(/token=([^&]+)/);
+            if (tokenMatch) {
+              // Call confirm API (POST — GET returns 405 now)
+              const confirmResult = await page.evaluate(async (token) => {
+                try {
+                  const resp = await fetch('/api/email-login/confirm?token=' + token, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+                    body: JSON.stringify({ token }),
+                    credentials: 'include',
+                    redirect: 'follow',
+                  });
+                  return { status: resp.status, ok: resp.ok };
+                } catch(e) { return { error: e.message }; }
+              }, tokenMatch[1]);
+              log("  Confirm API: " + JSON.stringify(confirmResult));
+
+              // Check if access_token cookie was set
+              const cookiesAfterConfirm = await page.cookies();
+              const atCookie = cookiesAfterConfirm.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+              if (atCookie) {
+                log("  ✅ access_token cookie set after manual confirm!");
+              }
+
+              // Navigate to redirect target (same as zo_register.js)
+              const redirectMatch = url.match(/redirect=([^&]+)/);
+              const redirectTarget = redirectMatch ? decodeURIComponent(redirectMatch[1]) : '/signup';
+              log("  Navigating to: " + redirectTarget);
+              try {
+                await page.goto('https://www.zo.computer' + redirectTarget, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              } catch(navErr) {
+                log("  Nav: " + navErr.message.substring(0, 50));
+              }
+              await new Promise(r => setTimeout(r, 3000));
+              const afterNavUrl = page.url();
+              log("  After nav: " + afterNavUrl);
+
+              // Check for subdomain (already registered)
+              try {
+                const hn3 = new URL(afterNavUrl).hostname;
+                if (hn3.endsWith('.zo.computer') && hn3 !== 'www.zo.computer') {
+                  log("  ✅ Already registered! At subdomain: " + afterNavUrl);
+                  redirectDone = true;
+                  break;
+                }
+              } catch(e) {}
+
+              // Check if redirect succeeded
+              if (/zo\.computer/.test(afterNavUrl) && !/verify|email-login/i.test(afterNavUrl)) {
+                log("  ✅ Redirect done after manual confirm!");
+                redirectDone = true;
+                break;
+              }
+            }
+          } catch(recoverErr) {
+            log("  Recovery error: " + recoverErr.message.substring(0, 60));
+          }
+          break; // Only attempt recovery once
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 3000));
     }
 
-    // Extract handle — multiple strategies with retries
+    if (!redirectDone) {
+      throw new Error("Login redirect did not complete (180s timeout)");
+    }
+
+    // ★ Check if page is on /signup (needs registration completion)
+    const currentUrl = page.url();
     let handle = "";
+    
+    if (/\/signup/i.test(currentUrl) && !/email-login/i.test(currentUrl)) {
+      log("  ⚠️ Account needs registration completion (on /signup)");
+      const completedHandle = await completeRegistration(page, email, log);
+      if (completedHandle) {
+        handle = completedHandle;
+        log("  ✅ Registration completed, handle: " + handle);
+      } else {
+        throw new Error("Cannot determine ZO handle for " + email);
+      }
+    } else {
+
+    // ★ Even on subdomain URL, check if registration is still needed
+    const needsRegCheck = await page.evaluate(() => {
+      const txt = document.body.innerText || '';
+      const hasHandleInput = !!document.querySelector('input[placeholder*="you"], input[name="handle"]');
+      const hasRegText = /choose.*handle|create.*handle|set.*username|complete.*profile|pick.*handle|you.*handle/i.test(txt);
+      // Also check for visible text input that looks like a handle field
+      const visibleInputs = document.querySelectorAll('input[type="text"]:not([readonly]), input[type="username"]');
+      let hasVisibleHandleInput = false;
+      for (const inp of visibleInputs) {
+        if (inp.offsetWidth > 100 && inp.offsetHeight > 0) { hasVisibleHandleInput = true; break; }
+      }
+      return hasHandleInput || hasRegText || hasVisibleHandleInput;
+    }).catch(() => false);
+
+    if (needsRegCheck) {
+      log("  ⚠️ Subdomain URL but registration form detected — completing registration...");
+      const completedHandle = await completeRegistration(page, email, log);
+      if (completedHandle) {
+        handle = completedHandle;
+        log("  ✅ Registration completed, handle: " + handle);
+      } else {
+        throw new Error("Cannot determine ZO handle for " + email);
+      }
+    } else {
+
+    // Extract handle — multiple strategies with retries
 
     // Strategy 1: Wait for page to render, then find "Go to your Zo" link
     for (let retry = 0; retry < 5 && !handle; retry++) {
@@ -283,14 +778,101 @@ async function loginAndGetAT(account, config, log) {
         }
       }
     }
+    } // end of inner else (no registration needed)
+    } // end of else block for non-/signup pages
+
+    // ★ Strategy 5: If still no handle, try to find it from the page content
+    if (!handle) {
+      log("  Trying to extract handle from page content...");
+      const pageContent = await page.evaluate(() => document.body.innerText).catch(() => "");
+      const handlePatterns = [
+        /https?:\/\/([a-z0-9]+)\.zo\.computer/gi,
+        /([a-z0-9]+)\.zo\.computer/gi,
+      ];
+      for (const pat of handlePatterns) {
+        let match;
+        while ((match = pat.exec(pageContent)) !== null) {
+          if (match[1] !== 'www' && match[1] !== 'app' && match[1].length >= 4) {
+            handle = match[1];
+            log("  Handle from page content: " + handle);
+            break;
+          }
+        }
+        if (handle) break;
+      }
+    }
+    
+    // ★ Strategy 6: Try navigating to email-based handle
+    if (!handle) {
+      const emailHandle = email.split("@")[0].substring(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "");
+      log("  Trying email-based handle: " + emailHandle);
+      try {
+        await page.goto("https://" + emailHandle + ".zo.computer/", { waitUntil: "domcontentloaded", timeout: 15000 });
+        await new Promise(r => setTimeout(r, 3000));
+        const testUrl = page.url();
+        if (testUrl.includes(emailHandle + ".zo.computer")) {
+          handle = emailHandle;
+          log("  ✅ Email-based handle works: " + handle);
+        }
+      } catch(e) {
+        log("  Email-based handle test failed: " + e.message.substring(0, 50));
+      }
+    }
 
     if (!handle) {
       throw new Error("Cannot determine ZO handle for " + email);
     }
 
+    // ★ Check if we're still stuck on /signup (registration didn't complete)
+    const preBootUrl = page.url();
+    if (/\/signup/i.test(preBootUrl)) {
+      log("  ⚠️ Still on /signup after registration attempt — retrying Continue click...");
+      // Try clicking Continue again
+      const retryClicked = await page.evaluate(() => {
+        for (const btn of document.querySelectorAll('button, [role="button"], input[type="submit"]')) {
+          const txt = (btn.textContent || btn.value || '').trim();
+          if (/continue|submit|sign.?up|create|next/i.test(txt) && btn.offsetWidth > 0) {
+            btn.click();
+            return txt;
+          }
+        }
+        return null;
+      }).catch(() => null);
+      if (retryClicked) {
+        log("  [REG] Retry click: '" + retryClicked + "'");
+        await new Promise(r => setTimeout(r, 5000));
+      } else {
+        // Try Enter key
+        await page.keyboard.press('Enter').catch(() => {});
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      // Check again
+      const afterRetryUrl = page.url();
+      if (/\/signup/i.test(afterRetryUrl)) {
+        log("  ❌ Registration failed — still on /signup. Aborting this account.");
+        throw new Error("Registration incomplete: stuck on /signup for " + email);
+      }
+      log("  ✅ Registration retry succeeded: " + afterRetryUrl.substring(0, 80));
+    }
+
     // === Boot dormant ZO space ===
     log("  Navigating to " + handle + ".zo.computer/_boot ...");
-    await page.goto("https://" + handle + ".zo.computer/_boot", { waitUntil: "domcontentloaded", timeout: 30000 });
+    try {
+      await page.goto("https://" + handle + ".zo.computer/_boot", { waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch(bootErr) {
+      if (/detached|destroyed|disposed|target closed/i.test(bootErr.message)) {
+        log("  ⚠️ Boot nav failed (detached frame), retrying with fresh page...");
+        try {
+          const pages = await browser.pages();
+          if (pages.length > 0) page = pages[pages.length - 1];
+          await page.goto("https://" + handle + ".zo.computer/_boot", { waitUntil: "domcontentloaded", timeout: 30000 });
+        } catch(retryErr) {
+          log("  ⚠️ Retry also failed: " + retryErr.message.substring(0, 60));
+        }
+      } else {
+        throw bootErr;
+      }
+    }
     await new Promise(r => setTimeout(r, 3000));
 
     // Check if we're on the boot page (dormant) or already active
@@ -352,54 +934,131 @@ async function loginAndGetAT(account, config, log) {
         if (!wakeClicked) await new Promise(r => setTimeout(r, 3000));
       }
 
-      // Wait for ZO space to boot up (redirect away from _boot)
+      // Wait for ZO space to boot up — 智能轮询 (2s间隔, 最长5分钟)
       if (wakeClicked) {
-        log("  Waiting for ZO space to boot...");
-        for (let i = 0; i < 100; i++) {
-          await new Promise(r => setTimeout(r, 3000));
-          bootUrl = page.url();
-          if (!/_boot/i.test(bootUrl)) {
-            log("  ✅ ZO space booted! URL: " + bootUrl.substring(0, 80));
+        log("  Waiting for ZO space to boot (smart poll, 2s interval)...");
+        let bootDone = false;
+        for (let i = 0; i < 150; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const curUrl = page.url();
+          
+          // ★ Primary: URL changed from _boot → boot is done
+          if (!/_boot/i.test(curUrl) && curUrl.startsWith('http') && !curUrl.includes('about:')) {
+            log("  ✅ ZO space booted (URL changed at " + ((i+1)*2) + "s): " + curUrl.substring(0, 80));
+            bootDone = true;
             break;
           }
-          // Check page text for boot progress
-          if (i % 5 === 0) {
-            const txt = await page.evaluate(() => document.body.innerText.substring(0, 200)).catch(() => "");
-            log("  Boot page text: " + txt.substring(0, 100).replace(/\n/g, ' | '));
+          
+          // ★ Secondary: check page content for boot progress
+          if (i % 3 === 0) {
+            const txt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
+            const pct = txt.match(/(\d+\.?\d*)%/);
+            if (pct) log("  Boot progress: " + pct[1] + "% (" + ((i+1)*2) + "s)");
+            
+            // Detect if space is actually running (even if URL hasn't changed yet)
+            if (/home|files|automations|chat|dashboard|workspace/i.test(txt) && !/start computer|restore|wake|save|dormant/i.test(txt)) {
+              log("  ✅ ZO space active (content detected at " + ((i+1)*2) + "s)");
+              bootDone = true;
+              break;
+            }
+            
+            if (i % 15 === 0 && i > 0) {
+              log("  Still booting... (" + ((i+1)*2) + "s) " + txt.substring(0, 80).replace(/\n/g, ' | '));
+            }
           }
-          // If stuck on "Not responding" / "Not reachable", just wait for auto-recovery
-          if (i > 5 && i % 5 === 0) {
-            const pageText = await page.evaluate(() => document.body.innerText).catch(() => "");
-            if (/not responding|not reachable|timed out|error/i.test(pageText)) {
-              log("  ⚠️ Space stuck ('Not responding'), waiting for auto-recovery...");
+          
+          // Detect stuck states and auto-recover
+          if (i > 10 && i % 10 === 0) {
+            const fullText = await page.evaluate(() => document.body.innerText).catch(() => "");
+            if (/not responding|not reachable|timed out|error|something went wrong/i.test(fullText)) {
+              log("  ⚠️ Space stuck, auto-recovery...");
+              await page.evaluate(() => {
+                for (const btn of document.querySelectorAll('button, a[role=button]')) {
+                  if (/retry|refresh|try again|reload/i.test((btn.textContent || '').trim())) { btn.click(); return; }
+                }
+              }).catch(() => {});
             }
           }
         }
-        if (/_boot/i.test(page.url())) {
+        if (!bootDone) {
           throw new Error("ZO space did not boot within 5 minutes");
         }
       }
     }
 
-    // Ensure we're in the chat interface — wait for full load
-    log("  Waiting for chat interface to fully load...");
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 3000));
+    // ★ 单一智能轮询：合并聊天界面检测 + ZO空间就绪检测
+    // 2s间隔，多维度检测，快就快退出，慢就耐心等（最长5分钟）
+    log("  Smart polling for chat interface + ZO space readiness...");
+    let chatReady = false;
+    for (let i = 0; i < 150; i++) {
+      await new Promise(r => setTimeout(r, 2000));
       const url = page.url();
-      if (/zo\.computer\/?$/.test(url) || /zo\.computer\/chat/i.test(url) || /zo\.computer\/signup/i.test(url)) {
-        const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => "");
-        if (/home|files|automations|integrations|skills|browser|hosting|首页|文件|自动化|集成|技能|浏览器|托管/i.test(bodyText) || /chat|message|ask|hello|hi|welcome|what can|how can|type/i.test(bodyText)) {
-          log("  ✅ Chat interface loaded (sidebar detected)");
+      
+      try {
+        const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1500)).catch(() => "");
+        if (!bodyText) continue;
+        
+        // ★ Multi-dimensional readiness detection (any 2 of 4 = ready)
+        let score = 0;
+        const signals = [];
+        
+        // Signal 1: Sidebar navigation items
+        if (/\bhome\b/i.test(bodyText) && (/\bfiles\b|automations|browser|skills|hosting|integrations|settings/i.test(bodyText))) {
+          score++;
+          signals.push("sidebar");
+        }
+        
+        // Signal 2: Chat input area (textarea, send button, placeholder text)
+        const hasChatInput = await page.evaluate(() => {
+          const inputs = document.querySelectorAll('textarea, input[type=text], [contenteditable=true]');
+          for (const inp of inputs) {
+            if (inp.offsetWidth > 100 && inp.offsetHeight > 0) return true;
+          }
+          for (const btn of document.querySelectorAll('button, [role=button]')) {
+            if (/send|submit/i.test((btn.textContent || '').trim()) && btn.offsetWidth > 0) return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (hasChatInput) { score++; signals.push("chatInput"); }
+        
+        // Signal 3: Chat content / welcome message / model selector
+        if (/welcome|new chat|start|GPT|gpt|claude|model|what can|ask me|how can|type.*message|send.*message/i.test(bodyText)) {
+          score++;
+          signals.push("chatContent");
+        }
+        
+        // Signal 4: URL is on workspace (not _boot, not signup)
+        const isWorkspace = /zo\.computer\/?(\?|$|\/chat|\/home|\/dashboard)/i.test(url) 
+          && !/_boot|signup|email-login|verify/i.test(url);
+        if (isWorkspace) { score++; signals.push("workspaceURL"); }
+        
+        // ★ Ready when score >= 2 (at least 2 independent signals confirm)
+        if (score >= 2) {
+          log("  ✅ Chat interface ready (" + ((i+1)*2) + "s, signals: " + signals.join("+") + ")");
+          chatReady = true;
           break;
         }
+        
+        // Log progress periodically
+        if (i % 10 === 0 && i > 0) {
+          log("  Waiting... (" + ((i+1)*2) + "s, score: " + score + "/4, signals: " + (signals.join(",") || "none") + ")");
+          log("  URL: " + url.substring(0, 70) + " | Text: " + bodyText.substring(0, 80).replace(/\n/g, ' '));
+        }
+        
+        // If still on _boot or loading page, check for boot progress
+        if (/_boot/i.test(url)) {
+          const pct = bodyText.match(/(\d+\.?\d*)%/);
+          if (pct && i % 5 === 0) log("  Boot: " + pct[1] + "%");
+        }
+      } catch(e) {
+        if (i % 10 === 0) log("  Poll error: " + e.message.substring(0, 60));
       }
-      if (i % 5 === 0) log("  Still waiting for chat interface... (" + (i*3) + "s)");
     }
-    log("  Current page: " + page.url().substring(0, 80));
-
-    // ★ Extra wait for ZO space to fully initialize before accessing settings
-    log("  Waiting 15s for ZO space to fully initialize...");
-    await new Promise(r => setTimeout(r, 15000));
+    
+    if (!chatReady) {
+      log("  ⚠️ Chat interface not fully detected after 5min, proceeding with current state...");
+      log("  Current URL: " + page.url().substring(0, 80));
+    }
 
     // === Get Access Token ===
     const accessToken = await fetchAccessToken(page, handle, config, log);
@@ -422,20 +1081,38 @@ async function loginAndGetAT(account, config, log) {
 
   } catch (e) {
     log("❌ Error: " + e.message);
-    const resultLine = JSON.stringify({ email, error: e.message, time: new Date().toISOString(), status: "fail" }) + "\n";
+    
+    // ★ Detect Microsoft account blocked (AADSTS70000)
+    const isBlocked = /AADSTS70000|service abuse|account.*locked|account.*disabled/i.test(e.message);
+    const status = isBlocked ? "blocked" : "fail";
+    
+    const resultLine = JSON.stringify({ email, error: e.message, time: new Date().toISOString(), status }) + "\n";
     fs.appendFileSync(RESULTS_FILE, resultLine, "utf8");
-    return { email, error: e.message, status: "fail" };
+    
+    // ★ Save blocked accounts to separate file
+    if (isBlocked) {
+      const blockedFile = path.join(REGISTERED_DIR, "blocked_accounts.txt");
+      fs.appendFileSync(blockedFile, email + "\n", "utf8");
+      log("⚠️ Account blocked by Microsoft, marked as unusable");
+    }
+    
+    return { email, error: e.message, status };
   } finally {
-    // ★ Close browser and kill process tree
+    // ★ Close browser and kill its process tree (only script-launched browser)
     if (browser) {
       try {
         const pid = browser.process()?.pid;
+        if (pid) {
+          scriptLaunchedPids.push(pid);
+        }
         await browser.close();
         if (pid) {
-          try { require("child_process").execSync(`taskkill /F /T /PID ${pid} 2>nul`, { stdio: "ignore" }); } catch(e) {}
+          try { execSync(`taskkill /F /T /PID ${pid} 2>nul`, { stdio: "ignore" }); } catch(e) {}
+          // Also try matching child processes by parent PID
+          try { execSync(`wmic process where (ParentProcessId=${pid}) delete 2>nul`, { stdio: "ignore" }); } catch(e) {}
         }
       } catch(e) {}
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1000));
     }
     // ★ Aggressive temp dir cleanup (retries)
     cleanupTempDir(tempDir);
@@ -508,11 +1185,17 @@ async function main() {
     // Worker pool: each worker pulls from queue, no batch waiting
     console.log("\n=== Processing " + needAT.length + " accounts (worker pool, concurrency=" + concurrency + ") ===\n");
     
-    const MAX_RETRIES = 2;
+    const MAX_RETRIES = 1; // Only retry transient errors once
     const queue = needAT.map(a => ({ account: a, retries: 0 }));
     const results = [];
     let completed = 0;
+    let skipped = 0;
     const total = needAT.length;
+    const startTime = Date.now();
+    
+    // Load blocked accounts
+    const blockedAccounts = loadBlockedAccounts();
+    console.log("Blocked accounts loaded: " + blockedAccounts.size);
 
     async function worker(workerId) {
       while (true) {
@@ -520,13 +1203,28 @@ async function main() {
         if (!task) break;
         
         const { account, retries } = task;
+        
+        // ★ Dynamic AT check before starting
+        if (hasAT(account.email)) {
+          skipped++;
+          console.log(`[W${workerId}] ⏭️ Skipped (already has AT): ${account.email.substring(0, 30)}`);
+          continue;
+        }
+        
+        // Check blocked list
+        if (blockedAccounts.has(account.email)) {
+          skipped++;
+          console.log(`[W${workerId}] ⏭️ Skipped (blocked): ${account.email.substring(0, 30)}`);
+          continue;
+        }
+        
         const tag = account.email.split("@")[0].substring(0, 15);
         const log = (msg) => {
           const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
           console.log(`[${ts}] [W${workerId}] [${tag}] ${msg}`);
         };
         
-        log(`Starting (${retries > 0 ? "retry " + retries + "/" + MAX_RETRIES : "attempt 1"}) [${completed}/${total} done]`);
+        log(`Starting (${retries > 0 ? "retry " + retries : "attempt 1"}) [${completed}/${total} done, ${skipped} skipped]`);
         
         try {
           const result = await loginAndGetAT(account, config, log);
@@ -535,27 +1233,36 @@ async function main() {
           if (result.status === "success") {
             log(`✅ SUCCESS [${completed}/${total}]`);
             results.push(result);
+          } else if (result.status === "blocked") {
+            blockedAccounts.add(account.email);
+            log(`⚠️ BLOCKED, skipping [${completed}/${total}]`);
+            results.push(result);
           } else {
-            if (retries < MAX_RETRIES) {
-              log(`❌ Fail, retrying (${retries+1}/${MAX_RETRIES}): ${result.error}`);
+            const errorClass = classifyError(result.error);
+            if (errorClass === "permanent") {
+              log(`❌ PERMANENT FAIL, no retry: ${result.error}`);
+              results.push(result);
+            } else if (errorClass === "transient" && retries < MAX_RETRIES) {
+              log(`🔄 TRANSIENT FAIL, retrying (${retries+1}/${MAX_RETRIES}): ${result.error}`);
               queue.push({ account, retries: retries + 1 });
             } else {
-              log(`❌ FAILED after ${MAX_RETRIES} retries: ${result.error}`);
+              log(`❌ FAILED: ${result.error}`);
               results.push(result);
             }
           }
         } catch (e) {
           completed++;
-          if (retries < MAX_RETRIES) {
-            log(`❌ Exception, retrying: ${e.message}`);
+          const errorClass = classifyError(e.message);
+          if (errorClass === "transient" && retries < MAX_RETRIES) {
+            log(`🔄 Exception, retrying: ${e.message}`);
             queue.push({ account, retries: retries + 1 });
           } else {
             log(`❌ FAILED: ${e.message}`);
-            results.push({ email: account.email, error: e.message, status: "fail" });
+            results.push({ email: account.email, error: e.message, status: "fail", errorClass });
           }
         }
         
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000));
       }
       console.log(`[Worker ${workerId}] No more tasks, exiting.`);
     }
@@ -573,14 +1280,25 @@ async function main() {
     await Promise.all(workers);
     
     // Summary
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
     console.log("\n\n" + "=".repeat(60));
     console.log("=== FINAL SUMMARY ===");
     console.log("=".repeat(60));
     const success = results.filter(r => r.status === "success");
     const fail = results.filter(r => r.status === "fail");
-    console.log(`✅ Success: ${success.length} | ❌ Failed: ${fail.length}`);
-    for (const r of success) {
-      console.log(`  ✅ ${r.email} (handle: ${r.handle})`);
+    const blocked = results.filter(r => r.status === "blocked");
+    
+    console.log(`⏱️ Time: ${elapsed}s (${Math.round(elapsed/60)}min)`);
+    console.log(`✅ Success: ${success.length}`);
+    console.log(`❌ Failed: ${fail.length}`);
+    console.log(`⚠️ Blocked: ${blocked.length}`);
+    console.log(`⏭️ Skipped: ${skipped}`);
+    
+    if (success.length > 0) {
+      console.log(`\n成功账号:`);
+      for (const r of success) {
+        console.log(`  ✅ ${r.email} (${r.handle})`);
+      }
     }
     if (fail.length > 0) {
       console.log("\nFailed:");

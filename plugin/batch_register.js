@@ -61,10 +61,15 @@ function parseAccounts(filePath) {
     const email = parts[0].trim();
     if (!email || seen.has(email)) continue;
     seen.add(email);
+    // ★ Fix: clientId might have leading '-' from password ending with special chars
+    let clientId = parts[2].trim();
+    if (clientId.startsWith("-") && /^[0-9a-f]{8}-/i.test(clientId.substring(1))) {
+      clientId = clientId.substring(1); // strip leading '-'
+    }
     accounts.push({
       email,
       password: parts[1].trim(),
-      clientId: parts[2].trim(),
+      clientId,
       refreshToken: parts[3].trim(),
     });
   }
@@ -111,7 +116,24 @@ async function worker(account, index, total) {
 
         return { email: account.email, status: "success", ...result };
       } catch (err) {
-        log(`❌ Attempt ${attempt} failed: ${err.message}`);
+        const errMsg = err.message || '';
+        // ★ 永久性错误：立即跳过，不重试
+        const isPermanentError = /AADSTS|token error|invalid_grant|application.*not found|refresh token.*invalid|account.*disabled|风控|risk|blocked|banned/i.test(errMsg);
+        if (isPermanentError) {
+          log(`🚫 PERMANENT ERROR — skipping: ${errMsg.substring(0, 80)}`);
+          // 标记邮箱不可用
+          const badFile = path.join(REGISTERED_DIR, "bad_accounts.txt");
+          if (!fs.existsSync(REGISTERED_DIR)) fs.mkdirSync(REGISTERED_DIR, { recursive: true });
+          fs.appendFileSync(badFile, `${account.email} | ${errMsg.substring(0, 100)} | ${new Date().toISOString()}\n`, "utf8");
+          fs.appendFileSync(RESULTS_FILE, JSON.stringify({
+            email: account.email,
+            status: "skipped",
+            reason: errMsg.substring(0, 100),
+            time: new Date().toISOString(),
+          }) + "\n", "utf8");
+          return { email: account.email, status: "skipped", reason: errMsg };
+        }
+        log(`❌ Attempt ${attempt} failed: ${errMsg}`);
         if (attempt < MAX_RETRIES) {
           log(`Retrying in 5s...`);
           await new Promise(r => setTimeout(r, 5000));
@@ -119,11 +141,11 @@ async function worker(account, index, total) {
           fs.appendFileSync(RESULTS_FILE, JSON.stringify({
             email: account.email,
             status: "fail",
-            reason: err.message,
+            reason: errMsg,
             time: new Date().toISOString(),
             attempt,
           }) + "\n", "utf8");
-          return { email: account.email, status: "fail", reason: err.message };
+          return { email: account.email, status: "fail", reason: errMsg };
         }
       }
     }

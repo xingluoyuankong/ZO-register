@@ -389,6 +389,48 @@ async function registerOne(emailItem) {
   }
 }
 
+// ========== Smart Chat Interface Detection ==========
+async function isChatInterfaceReady(page, bodyText, currentUrl) {
+  const isChatUrl = currentUrl && /\.zo\.computer\/(chat|c\/|workspace|$)/i.test(currentUrl)
+    && !/signup|login|verify|email-login/i.test(currentUrl);
+  const hasChatText = /what can|how can|ask me|new chat|start.*chat|type.*message|send.*message/i.test(bodyText || "");
+  let domSignals = 0;
+  try {
+    domSignals = await page.evaluate(() => {
+      let signals = 0;
+      const textareas = document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]');
+      for (const ta of textareas) {
+        const ph = (ta.placeholder || "") + " " + (ta.getAttribute('aria-label') || "");
+        if (/message|chat|ask|type|send|what/i.test(ph)) { signals += 2; break; }
+        if (ta.offsetParent !== null) signals += 1;
+      }
+      const msgContainers = document.querySelectorAll('[class*="message"], [class*="chat"], [class*="conversation"], [class*="thread"], [data-message-id]');
+      for (const mc of msgContainers) {
+        if (mc.offsetParent !== null && mc.children.length > 0) { signals += 1; break; }
+      }
+      for (const el of document.querySelectorAll('button, a, [role="button"]')) {
+        const txt = el.textContent.trim();
+        if (/new chat|start chat|new conversation/i.test(txt) && el.offsetParent !== null) { signals += 1; break; }
+      }
+      const sidebars = document.querySelectorAll('[class*="sidebar"], [class*="side-bar"], nav, aside');
+      for (const sb of sidebars) {
+        if (sb.offsetParent !== null && sb.children.length > 2) { signals += 1; break; }
+      }
+      const sendBtns = document.querySelectorAll('button[type="submit"], [class*="send"], [aria-label*="send"], [aria-label*="Send"]');
+      for (const btn of sendBtns) {
+        if (btn.offsetParent !== null) { signals += 1; break; }
+      }
+      const iframes = document.querySelectorAll('iframe[src*="chat"], iframe[src*="zo"]');
+      if (iframes.length > 0) signals += 1;
+      return signals;
+    }).catch(() => 0);
+  } catch (e) {}
+  if (isChatUrl && (hasChatText || domSignals >= 1)) return true;
+  if (domSignals >= 3) return true;
+  if (hasChatText && domSignals >= 1) return true;
+  return false;
+}
+
 async function registerOneWithBrowser(browser, page, emailItem, log) {
   const { email, password, clientId, refreshToken } = emailItem;
   try {
@@ -723,31 +765,198 @@ async function registerOneWithBrowser(browser, page, emailItem, log) {
     }
     await sleep(5000);
 
-    // Step 7: Boot → Go to your Zo
+    // Step 7: Boot → Go to your Zo → 等待聊天界面真正加载
     log("[7/7] Waiting for boot...");
-    for (let i = 1; i <= 50; i++) {
-      await sleep(5000);
-      const txt = await getBodyText(page, 400);
+
+    // ===== 7a: 等待 "Go to your Zo" 按钮出现 =====
+    let foundGoButton = false;
+    const bootStart = Date.now();
+    let lastProgressPct = -1;
+    let lastProgressTime = Date.now();
+    let STALE_TIMEOUT = 90000;
+
+    while (Date.now() - bootStart < 480000) {
+      const elapsed = Date.now() - bootStart;
+      const interval = elapsed < 30000 ? 1000 : 2000;
+      await sleep(interval);
+
+      const txt = await getBodyText(page, 600);
+      const currentUrl = page.url();
+
+      if (await isChatInterfaceReady(page, txt, currentUrl)) {
+        log("  Chat interface detected directly (skipped Go button)!");
+        foundGoButton = true;
+        break;
+      }
+
       if (/go to your zo/i.test(txt)) {
         log("  Boot complete! Clicking 'Go to your Zo'...");
+        const clickedGo = await page.evaluate(() => {
+          for (const el of document.querySelectorAll("button, a, div[role=button], span")) {
+            if (/go to your zo/i.test(el.textContent.trim()) && el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        }).catch(() => false);
+        if (clickedGo) {
+          log("  Clicked 'Go to your Zo'");
+          foundGoButton = true;
+          await sleep(2000);
+          break;
+        }
+      }
+
+      if (/invalid|expired|something went wrong|error occurred/i.test(txt) && !/booting|starting|loading|%/i.test(txt)) {
+        throw new Error("Boot failed: " + txt.substring(0, 80));
+      }
+
+      const pct = txt.match(/(\d+\.?\d*)%/);
+      if (pct) {
+        const pctNum = parseFloat(pct[1]);
+        if (pctNum !== lastProgressPct) {
+          lastProgressPct = pctNum;
+          lastProgressTime = Date.now();
+          log("  Boot: " + pctNum + "%");
+          setEmailStatus(email, "registering", { progress: pctNum + "%" });
+        }
+      }
+
+      if (Date.now() - lastProgressTime > STALE_TIMEOUT && elapsed > 30000) {
+        const lastCheck = await getBodyText(page, 400);
+        if (lastCheck === txt && !/go to your zo/i.test(lastCheck)) {
+          const hasLoadingIndicator = await page.evaluate(() => {
+            const spinners = document.querySelectorAll('[class*="spin"], [class*="load"], [class*="progress"], [class*="boot"], svg[class*="anim"]');
+            return spinners.length > 0;
+          }).catch(() => false);
+          if (!hasLoadingIndicator) {
+            throw new Error("Boot stalled: no progress for " + Math.round(STALE_TIMEOUT/1000) + "s (last: " + (lastProgressPct >= 0 ? lastProgressPct + "%" : "none") + ")");
+          }
+          lastProgressTime = Date.now();
+        }
+      }
+
+      if (elapsed % 15000 < interval) {
+        log("  [" + Math.round(elapsed/1000) + "s] Boot in progress... (last: " + (lastProgressPct >= 0 ? lastProgressPct + "%" : "waiting") + ")");
+      }
+    }
+
+    if (!foundGoButton) {
+      const finalTxt = await getBodyText(page, 600);
+      const finalUrl = page.url();
+      if (await isChatInterfaceReady(page, finalTxt, finalUrl)) {
+        log("  Chat interface detected at timeout!");
+        foundGoButton = true;
+      } else if (/go to your zo/i.test(finalTxt)) {
         await page.evaluate(() => {
           for (const el of document.querySelectorAll("button, a, div[role=button]")) {
             if (/go to your zo/i.test(el.textContent.trim())) { el.click(); return; }
           }
         });
-        await sleep(8000);
-        const finalUrl = page.url();
-        log("  SUCCESS! URL: " + finalUrl);
-        try { renameSync(join(EMAIL_DIR, email + ".txt"), join(REGISTERED_DIR, email + ".txt")); } catch (e) {}
-        return { handle, zoAddress: handle + ".zo.computer", url: finalUrl };
+        foundGoButton = true;
+        await sleep(2000);
+      } else {
+        throw new Error("Boot timeout (480s) - no Go button or chat interface detected: " + finalTxt.substring(0, 80));
       }
-      if (/invalid|expired|something went wrong/i.test(txt) && !/booting|starting|%/i.test(txt)) {
-        throw new Error("Boot failed: " + txt.substring(0, 60));
-      }
-      const pct = txt.match(/(\d+\.?\d*)%/);
-      if (pct && i % 3 === 0) { log("  Boot: " + pct[1] + "%"); setEmailStatus(email, "registering", { progress: pct[1] + "%" }); }
     }
-    throw new Error("Boot timeout (250s)");
+
+    // ===== 7b: 等待ZO空间重启 + 聊天界面真正加载 =====
+    log("  Waiting for ZO space to start & chat interface to load...");
+    let chatReady = false;
+    const chatWaitStart = Date.now();
+    let lastPageText = "";
+    let lastChangeTime = Date.now();
+    let consecutiveNoChange = 0;
+    const CHAT_MAX_WAIT = 300000;
+
+    while (Date.now() - chatWaitStart < CHAT_MAX_WAIT) {
+      const elapsed = Date.now() - chatWaitStart;
+      const interval = elapsed < 20000 ? 1000 : (elapsed < 60000 ? 1500 : 2000);
+      await sleep(interval);
+
+      const txt = await getBodyText(page, 800);
+      const currentUrl = page.url();
+
+      if (await isChatInterfaceReady(page, txt, currentUrl)) {
+        log("  Chat interface is READY! URL: " + currentUrl);
+        chatReady = true;
+        break;
+      }
+
+      const pct = txt.match(/(\d+\.?\d*)%/);
+      if (pct) {
+        const pctNum = parseFloat(pct[1]);
+        if (pctNum !== lastProgressPct) {
+          log("  ZO restart: " + pctNum + "%");
+          lastProgressPct = pctNum;
+          lastChangeTime = Date.now();
+          consecutiveNoChange = 0;
+          setEmailStatus(email, "registering", { progress: "ZO " + pctNum + "%" });
+        }
+      }
+
+      if (/booting|starting|initializing|loading|preparing|restarting|warming up/i.test(txt)) {
+        lastChangeTime = Date.now();
+        consecutiveNoChange = 0;
+      }
+
+      const textHash = txt.substring(0, 100);
+      if (textHash !== lastPageText) {
+        lastPageText = textHash;
+        lastChangeTime = Date.now();
+        consecutiveNoChange = 0;
+      } else {
+        consecutiveNoChange++;
+      }
+
+      if (/crashed|fatal|error|failed to start|cannot connect/i.test(txt) && !/loading|starting|booting/i.test(txt)) {
+        throw new Error("ZO space error: " + txt.substring(0, 80));
+      }
+
+      if (consecutiveNoChange > 30 && elapsed > 30000) {
+        const hasActivity = await page.evaluate(() => {
+          const anims = document.querySelectorAll('[class*="spin"], [class*="load"], [class*="progress"], [class*="boot"], [class*="anim"], [class*="pulse"], [class*="dot"]');
+          if (anims.length > 0) return true;
+          const media = document.querySelectorAll('canvas, video');
+          if (media.length > 0) return true;
+          const body = document.body.innerText;
+          return /loading|starting|boot|wait|preparing|%/i.test(body);
+        }).catch(() => false);
+        if (!hasActivity) {
+          if (await isChatInterfaceReady(page, txt, currentUrl)) {
+            log("  Chat interface detected at stale check!");
+            chatReady = true;
+            break;
+          }
+          throw new Error("ZO space stalled: no activity for " + Math.round(consecutiveNoChange * interval / 1000) + "s");
+        }
+        consecutiveNoChange = 0;
+      }
+
+      if (elapsed % 20000 < interval) {
+        log("  [" + Math.round(elapsed/1000) + "s] Waiting for chat interface... URL: " + currentUrl.substring(0, 60));
+      }
+    }
+
+    if (!chatReady) {
+      const lastTxt = await getBodyText(page, 800);
+      const lastUrl = page.url();
+      if (await isChatInterfaceReady(page, lastTxt, lastUrl)) {
+        chatReady = true;
+        log("  Chat interface detected at final check!");
+      } else if (/\.zo\.computer/i.test(lastUrl) && !/signup|login|verify|error/i.test(lastUrl)) {
+        chatReady = true;
+        log("  URL suggests chat page (final fallback): " + lastUrl);
+      } else {
+        throw new Error("Chat interface not loaded within " + Math.round(CHAT_MAX_WAIT/1000) + "s: " + lastTxt.substring(0, 80));
+      }
+    }
+
+    const finalUrl = page.url();
+    log("  SUCCESS! Final URL: " + finalUrl);
+    try { renameSync(join(EMAIL_DIR, email + ".txt"), join(REGISTERED_DIR, email + ".txt")); } catch (e) {}
+    return { handle, zoAddress: handle + ".zo.computer", url: finalUrl };
 
   } catch (e) {
     log("FAILED: " + e.message);
