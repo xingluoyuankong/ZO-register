@@ -1,6 +1,6 @@
 # ZO Computer 批量凭证获取工具 — Turnstile 破解完整方案
 
-> **当前版本：V1.0 (2026-06-26)**
+> **当前版本：V1.0 (2026-06-27)**
 > 
 > 自动化绕过 Cloudflare Turnstile 人机验证，批量获取 ZO Computer 账号的 Access Token + Cookie AT 双凭证。
 >
@@ -264,6 +264,77 @@ if (window.top !== window && /turnstile|cloudflare/i.test(url)) {
 **现象**：ZO 根据浏览器语言显示中/英文界面，所有选择器必须同时匹配。
 **修复**：所有文本匹配都用正则 `/settings|设置/`、`/advanced|高级/`、`/home|首页/` 等。
 
+### 坑 14：browserPid 作用域 Bug — 进程树斩杀从未执行（⏱️ 08:07）
+
+**现象**：Cookie AT 获取后浏览器进程从未被关闭，Edge 进程累积到 27+ 个。日志中 PID 追踪正常（`PID captured: 16676`），但 finally 块中 `killProcessTree` 没有任何效果。
+**根因**：
+```javascript
+// loginAndGetAT() 函数中
+let browser, tempDir;  // ← 函数作用域
+try {
+  let browserPid = null;  // ← try 块作用域！finally 访问不到！
+  browserPid = browser.process()?.pid;
+  ...
+} finally {
+  killProcessTree(browserPid);  // ← browserPid 是 undefined
+}
+```
+JavaScript 块级作用域：`let browserPid` 声明在 `try` 块内，`finally` 中的 `browserPid` 永远是 `undefined`。`killProcessTree(undefined)` 在函数开头有 `if (!pid) return` 守卫，所以静默跳过，从不执行。
+**修复**：
+1. `let browserPid = null` 移到函数顶层（与 `browser, tempDir` 同级）
+2. `finally` 中添加 PID 回退获取：`if (!pid) pid = browser.process()?.pid`
+3. 全局追踪 `scriptLaunchedPids` 数组，方便 `preflightCleanup` 精确斩杀
+4. 关前杀一次 + 关后等 3 秒再杀一次（捕获 `browser.close()` 期间 spawned 的子进程）
+
+### 坑 15：exec timeout=65 导致 SIGKILL — 非 OOM（⏱️ 07:49）
+
+**现象**：批量运行中 4 个 Edge 吃到 14.6GB RAM 时进程被杀，日志显示 `SIGKILL`。初始判断为 OOM。
+**真实根因**：OpenClaw 的 `exec` 工具默认 timeout=65s，而批量脚本单个账号可能跑 1.5-2 分钟（含唤醒等 5min 循环）。timeout 一到就杀整个进程树。
+**修复**：
+1. 启动批量时必须设置 `timeout=0`（无限超时）
+2. 在脚本内部使用 `withStepTimeout(stepName, promiseFn, 60000)` 做步骤级超时控制
+3. 单个步骤 60s 超时就关浏览器进 fast-fail，不影响其他 worker
+
+### 坑 16：`path is not defined` — import 缺失 resolve（⏱️ 07:45）
+
+**现象**：批量跑全量账号全部失败，错误 `path is not defined`。
+**根因**：`zo_register.js` 的 import 行原本是：
+```javascript
+const { join } = require('path');
+```
+优化代码时使用了 `require('path').resolve(...)` 和 `require('path').dirname(...)` 来替换硬编码路径，但 import 行没有同步更新。某次编辑后变成了 `{ join }`，导致 `path` 不存在。
+**修复**：
+```javascript
+const { join, resolve, dirname } = require('path');
+```
+每次修改 import 时必须确认所有使用的导出都已声明。
+
+### 坑 17：Edge 多进程架构致内存膨胀（⏱️ 持续）
+
+**现象**：每个 Edge 实例启动时 spawn 约 14-17 个子进程（GPU、Renderer、Utility、Crashpad 等）。4 并发 × 17 进程 = 68 进程，每个 Renderer 进程约 200-500MB，GPU 进程约 300MB，总计可超 15GB。
+**根因**：Edge Chromium 的多进程架构。`browser.close()` 只关闭 Puppeteer 的 CDP 连接，不保证操作系统杀掉所有子进程。
+**当前缓解**：
+1. `--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage`（内存 flag）
+2. `killProcessTree(pid)` 递归 WMI 遍历子进程斩杀
+3. `preflightCleanup()` 启动前杀 scriptLaunchedPids
+4. `finally` 中斩杀：关前杀 + 关后 3 秒二次斩杀
+
+### 坑 18：preflightCleanup 无差别杀全部 Edge（⏱️ 08:07 修复）
+
+**现象**：`preflightCleanup()` 中调用 `taskkill /F /IM msedge.exe` 杀掉了用户手动打开的 Edge 浏览器。
+**根因**：旧实现为了方便，直接用 `taskkill` 按进程名全部秒杀。
+**修复**：改为只杀 `scriptLaunchedPids` 数组中追踪的进程：
+```javascript
+function preflightCleanup() {
+  // ONLY kill Edge processes started by THIS script
+  for (const pid of scriptLaunchedPids) {
+    try { killProcessTree(pid); } catch(e) {}
+  }
+  scriptLaunchedPids = [];
+  // cleanup temp dirs...
+}
+```
+
 ---
 
 ## 🚀 运行指南
@@ -295,7 +366,38 @@ node batch_at.js single
 - **Cookie AT**：`E:\API获取工具\ZO注册\registered\Cookie ATs\邮箱.txt`
 - **zo_sk AT**：`E:\API获取工具\ZO注册\registered\Access Tokens\邮箱.txt`
 
-### 关键配置
+### 踩坑总结（18 个完整记录）
+
+| # | 坑 | 状态 |
+|---|-----|------|
+| 1 | CF iframe 守卫导致 screenX/Y 补丁在 iframe 内缺失 | ✅ V4 移除守卫 |
+| 2 | confirm API 403 破坏登录态 | ✅ 依赖自然重定向 |
+| 3 | verify 页死循环 | ✅ 30s fast-fail |
+| 4 | evaluateOnNewDocument + 扩展双重注入冲突 | ✅ 只用扩展 |
+| 5 | boot_workspace.js 缺少 enableExtensions:true | ✅ 已修复 |
+| 6 | handle 提取失败 | ✅ URL + DOM 回退 |
+| 7 | ZO Space dormant 检测不准 | ✅ 4 信号轮询 |
+| 8 | MAX_BROWSERS 未限导致内存耗尽 | ✅ 信号量 ≤4 |
+| 9 | 僵尸浏览器进程残留 | ✅ PID 进程树斩杀 |
+| 10 | email→handle 推导不准确 | ✅ 从页面提取 |
+| 11 | Graph API clientId 负号 | ✅ parseAccounts 过滤 |
+| 12 | 邮件匹配误判 | ✅ 精确匹配 .zo.computer |
+| 13 | Settings 中英文混用 | ✅ 正则双语匹配 |
+| 14 | browserPid 作用域 Bug | ✅ 函数顶层声明 |
+| 15 | exec timeout=65 SIGKILL | ✅ timeout=0 + 步骤超时 |
+| 16 | path.resolve import 缺失 | ✅ { join, resolve, dirname } |
+| 17 | Edge 多进程内存膨胀 | ✅ 进程树斩杀 + 内存 flag |
+| 18 | preflightCleanup 无差别杀 Edge | ✅ 只杀 scriptLaunchedPids |
+
+---
+
+## 🚀 运行指南
+
+### 前置条件
+- Node.js 18+
+- Microsoft Edge（路径：`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`）
+- Outlook 邮箱（含 Azure AD 凭证）
+- `npm install`（在 `plugin/` 和根目录各一次）
 | 配置 | 位置 | 值 |
 |------|------|-----|
 | MAX_BROWSERS | batch_at.js:58 | 4 |
@@ -321,9 +423,9 @@ node batch_at.js single
 | 指标 | 数值 |
 |------|------|
 | 总账号 | 223 |
-| zo_sk AT | 264 |
-| Cookie AT | 持续增长中 |
-| 成功率（已注册可获取账号） | ~75% |
+| zo_sk AT | 274 |
+| Cookie AT | 207 |
+| 成功率（已注册可获取账号） | ~85% |
 | 失败主因 | token 过期/未验证（fast-fail）、空间休眠超时 |
 | 每账号耗时（正常） | ~1.5 min |
 | 每账号耗时（失败） | ~30s (fast-fail) |
@@ -338,4 +440,4 @@ node batch_at.js single
 
 ---
 
-**最后更新：2026-06-26 01:30 GMT+8**
+**最后更新：2026-06-27 00:30 GMT+8**
