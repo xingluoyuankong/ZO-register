@@ -4,7 +4,7 @@
  */
 const puppeteer = require("puppeteer-core");
 const { writeFileSync, readFileSync, appendFileSync, existsSync, mkdirSync } = require("fs");
-const { join } = require("path");
+const { join, resolve, dirname } = require("path");
 const os = require("os");
 const fs = require("fs");
 
@@ -58,28 +58,32 @@ async function launchBrowser(config, log) {
   const extDir = config.turnstileExtDir || join(__dirname, "..", "turnstile-extension");
   const extExists = existsSync(join(extDir, "manifest.json"));
 
-  // ★ Original stable launch args (restored after crashes)
   const launchArgs = [
     "--no-first-run", "--no-default-browser-check", "--disable-default-apps",
     "--disable-features=Translate", "--disable-blink-features=AutomationControlled",
-    "--window-size=1440,900",
+    "--window-size=1440,900", "--disk-cache-size=0",
     "--disable-save-password-bubble", "--disable-password-generation",
     "--password-store=basic", "--disable-sync",
-    "--disable-client-side-phishing-detection",
-    "--disable-hang-monitor",
-    "--no-sandbox", "--disable-component-update",
+    "--disable-client-side-phishing-detection", "--disable-background-networking",
+    "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding", "--disable-hang-monitor",
+    "--disable-gpu", "--disable-software-rasterizer", "--disable-dev-shm-usage",
+    "--no-sandbox", "--disable-setuid-sandbox", "--disable-component-update",
     "--metrics-recording-only", "--no-pings",
     "--disable-plugins-discovery", "--disable-infobars",
-    "--disable-gpu", "--disable-software-rasterizer",
-    "--disk-cache-size=0",
-    "--disable-background-timer-throttling",
+    "--renderer-process-limit=2", "--process-per-site",
+    "--disable-features=msSmartScreenProtection,msEdgeShopping,msEdgeWalletCheckoutExperience,msEdgeSidebar,msEdgeCollections",
   ];
 
   // ★ Load Turnstile bypass extension (world:MAIN, all_frames:true)
+  // ★ ALSO disable all other extensions to save memory
   if (extExists) {
-    launchArgs.push("--load-extension=" + extDir);
+    const extPath = resolve(extDir).replace(/\\/g, '/');
+    launchArgs.push("--disable-extensions-except=" + extPath);
+    launchArgs.push("--load-extension=" + extPath);
     log("[BROWSER] Turnstile extension loaded from: " + extDir);
   } else {
+    launchArgs.push("--disable-extensions");
     log("[BROWSER] ⚠️ Turnstile extension NOT found at: " + extDir);
   }
 
@@ -91,6 +95,7 @@ async function launchBrowser(config, log) {
     args: launchArgs,
     defaultViewport: { width: 1440, height: 900 },
     ignoreDefaultArgs: ["--enable-automation"],
+    enableExtensions: true,  // ★ puppeteer-core 25.x: 不加这个会默认 --disable-extensions
   });
 
   // ★ Stealth handled entirely by turnstile-extension (world:MAIN, all_frames:true)
@@ -473,7 +478,7 @@ async function fetchAccessToken(page, handle, config, log) {
 
   if (!settingsLoaded) {
     try {
-      const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_" + handle + ".png");
+      const ssPath = join(dirname(__dirname), "registered", "debug_token_" + handle + ".png");
       await page.screenshot({ path: ssPath, fullPage: false });
       log("[TOKEN] Debug screenshot: " + ssPath);
     } catch(e) {}
@@ -569,7 +574,7 @@ async function fetchAccessToken(page, handle, config, log) {
   if (!keyNameFilled) {
     log("[TOKEN] ⚠️ Failed to fill key name input");
     try {
-      const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_input_" + handle + ".png");
+      const ssPath = join(dirname(__dirname), "registered", "debug_token_input_" + handle + ".png");
       await page.screenshot({ path: ssPath, fullPage: false });
       log("[TOKEN] Debug screenshot: " + ssPath);
     } catch(e) {}
@@ -665,7 +670,7 @@ async function fetchAccessToken(page, handle, config, log) {
 
   log("[TOKEN] ⚠️ Token not found after waiting");
   try {
-    const ssPath = require('path').join(require('path').dirname(__dirname), "registered", "debug_token_result_" + handle + ".png");
+    const ssPath = join(dirname(__dirname), "registered", "debug_token_result_" + handle + ".png");
     await page.screenshot({ path: ssPath, fullPage: false });
     log("[TOKEN] Debug screenshot: " + ssPath);
   } catch(e) {}

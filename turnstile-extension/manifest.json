@@ -1,0 +1,17 @@
+{
+    "manifest_version": 3,
+    "name": "ZO Turnstile Bypass",
+    "version": "4.0",
+    "description": "Cloudflare Turnstile bypass via screenX/screenY patch (ALL frames, no CF guard)",
+    "content_scripts": [
+        {
+            "js": ["./script.js"],
+            "matches": ["<all_urls>"],
+            "run_at": "document_start",
+            "all_frames": true,
+            "world": "MAIN"
+        }
+    ],
+    "permissions": [],
+    "host_permissions": ["<all_urls>"]
+}

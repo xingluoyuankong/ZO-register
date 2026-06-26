@@ -233,51 +233,57 @@ async function registerOne(emailItem) {
       });
       log("[BROWSER] Connected to Nstbrowser");
     } else {
-      // Chrome/Edge: 独立临时 user-data-dir + 无痕模式
-      tempDir = mkdtempSync(join(os.tmpdir(), "zo_reg_"));
+      // 使用 xbrowser cft profile（Cloudflare 已信任的真实浏览器 Profile）
+      const cftProfile = join(__dirname, "_cft_profile");
+      if (!existsSync(cftProfile)) mkdirSync(cftProfile, { recursive: true });
+      tempDir = cftProfile;
       const exePath = bt === "edge" ? EDGE_PATH : CHROME_PATH;
       const browserName = bt === "edge" ? "Edge" : "Chrome";
+
+      // Turnstile extension
+      const extDir = join(__dirname, "turnstile-extension");
+      const extExists = existsSync(join(extDir, "manifest.json"));
+      
+      const args = [
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--disable-features=Translate",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1440,900",
+        "--disable-save-password-bubble",
+        "--disable-password-generation",
+        "--password-store=basic",
+        "--disable-sync",
+        "--disable-client-side-phishing-detection",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-hang-monitor",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-component-update",
+        "--metrics-recording-only",
+        "--no-pings",
+        "--disable-infobars",
+      ];
+      if (extExists) args.push("--load-extension=" + extDir);
 
       browser = await puppeteer.launch({
         executablePath: exePath,
         headless: false,
         protocolTimeout: 300000,
-        userDataDir: tempDir,
-        args: [
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--disable-default-apps",
-          "--disable-features=Translate",
-          "--disable-blink-features=AutomationControlled",
-          "--window-size=1440,900",
-          "--incognito",
-          "--disk-cache-size=0",
-          "--disable-save-password-bubble",
-          "--disable-password-generation",
-          "--password-store=basic",
-          "--disable-sync",
-          "--disable-client-side-phishing-detection",
-          "--disable-background-networking",
-          "--disable-background-timer-throttling",
-          "--disable-backgrounding-occluded-windows",
-          "--disable-renderer-backgrounding",
-          "--disable-hang-monitor",
-          "--disable-gpu",
-          "--disable-software-rasterizer",
-          "--disable-dev-shm-usage",
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-component-update",
-          "--metrics-recording-only",
-          "--no-pings",
-          "--disable-extensions",
-          "--disable-plugins-discovery",
-          "--disable-infobars",
-        ],
+        userDataDir: cftProfile,
+        enableExtensions: true,
+        args,
         defaultViewport: { width: 1440, height: 900 },
         ignoreDefaultArgs: ["--enable-automation"],
       });
-      log("[BROWSER] " + browserName + " fresh profile: " + tempDir);
+      log("[BROWSER] " + browserName + " with cft profile: " + cftProfile);
     }
 
     const pages = await browser.pages();

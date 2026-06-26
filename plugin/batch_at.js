@@ -1,4 +1,4 @@
-/**
+﻿/**
  * batch_at.js — 批量获取已注册账号的 Access Token
  * 
  * 流程：
@@ -30,8 +30,16 @@ const { launchBrowser, fetchAccessToken, getMailToken, findMagicLink, pollMagicL
 let scriptLaunchedPids = [];  // Track PIDs of browsers launched by this script
 
 function preflightCleanup() {
-  // Only clean up leftover temp dirs from previous runs
-  // Do NOT kill all browser processes — that was destroying user's own browsers
+  // ★ ONLY kill Edge processes that this script started (tracked via PIDs)
+  // NEVER kill random Edge browsers that belong to the user
+  if (scriptLaunchedPids.length > 0) {
+    for (const pid of scriptLaunchedPids) {
+      try { killProcessTree(pid); } catch(e) {}
+    }
+    scriptLaunchedPids = [];
+  }
+
+  // Clean up leftover temp dirs from previous runs
   const tmpBase = path.join("E:\\Openclaw\\tmp");
   if (fs.existsSync(tmpBase)) {
     const dirs = fs.readdirSync(tmpBase).filter(d => d.startsWith("zo_reg_"));
@@ -54,8 +62,48 @@ function cleanupTempDir(tempDir) {
   }
 }
 
+// ===== Process tree killer (aggressive, recursive) =====
+function killProcessTree(pid) {
+  if (!pid) return;
+  try {
+    // Use WMI to recursively find and kill all descendant processes
+    const psScript = `
+$visited = @{${pid}=$true}
+function Kill-Tree($p) {
+  Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" -ErrorAction SilentlyContinue | ForEach-Object {
+    if (-not $visited[$_.ProcessId]) {
+      $visited[$_.ProcessId] = $true
+      Kill-Tree $_.ProcessId
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+}
+Kill-Tree ${pid}
+Get-CimInstance Win32_Process -Filter "Name='msedge.exe' AND ParentProcessId=${pid}" -ErrorAction SilentlyContinue | ForEach-Object {
+  Kill-Tree $_.ProcessId
+}
+`.replace(/\r?\n/g, ' ');
+    execSync(`powershell -NoProfile -Command "${psScript}"`, { stdio: "ignore", timeout: 10000 });
+  } catch(e) { /* best-effort */ }
+}
+
+// ===== Step timeout wrapper (60s per step) =====
+async function withStepTimeout(stepName, promiseFn, log) {
+  const TIMEOUT_MS = 60000;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Timeout: " + stepName + " (" + TIMEOUT_MS/1000 + "s)")), TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([promiseFn(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ===== Browser count enforcement =====
-const MAX_BROWSERS = 5;
+const MAX_BROWSERS = 4;  // ★ User requirement: maximum 4 concurrent, NOT "start 4 every time"
 let activeBrowsers = 0;
 const browserQueue = [];
 let browserQueueResolve = null;
@@ -87,6 +135,7 @@ const REGISTERED_DIR = path.join(__dirname, "..", "registered");
 const AT_DIR = path.join(REGISTERED_DIR, "Access Tokens");
 const RESULTS_FILE = path.join(REGISTERED_DIR, "at_results.jsonl");
 const BLOCKED_FILE = path.join(REGISTERED_DIR, "blocked_accounts.txt");
+const COOKIE_AT_DIR = path.join(REGISTERED_DIR, "Cookie ATs");
 
 // ===== Parse zo.txt =====
 function parseAccounts(filePath) {
@@ -124,6 +173,58 @@ function hasAT(email) {
   return fs.existsSync(path.join(AT_DIR, email + ".txt"));
 }
 
+// ===== Cookie AT checks =====
+function hasCookieAT(email) {
+  return fs.existsSync(path.join(COOKIE_AT_DIR, email + ".txt"));
+}
+
+function saveCookieAT(email, handle, cookie, log) {
+  if (!fs.existsSync(COOKIE_AT_DIR)) fs.mkdirSync(COOKIE_AT_DIR, { recursive: true });
+  const cookieFile = path.join(COOKIE_AT_DIR, email + ".txt");
+  const expires = cookie.expires > 0 ? new Date(cookie.expires * 1000).toISOString() : "unknown";
+  fs.writeFileSync(cookieFile, [
+    "email: " + email,
+    "handle: " + handle,
+    "zoAddress: " + handle + ".zo.computer",
+    "cookieAT: " + cookie.value,
+    "domain: " + (cookie.domain || ".zo.computer"),
+    "expires: " + expires,
+    "time: " + new Date().toISOString(),
+  ].join("\n"), "utf-8");
+  log("[COOKIE] ✅ Cookie AT saved: " + cookieFile);
+}
+
+async function getCookieATFromBrowser(browser, handle, log) {
+  try {
+    const allCookies = await browser.cookies();
+    let atCookie = allCookies.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+    if (atCookie) {
+      log("[COOKIE] ✅ Found in browser cookies: " + atCookie.value.substring(0, 30) + "...");
+      return atCookie;
+    }
+    // Try navigating to workspace to trigger cookie set
+    if (handle) {
+      const wsUrl = "https://" + handle + ".zo.computer/";
+      log("[COOKIE] Not in cookies, navigating to workspace: " + wsUrl);
+      const pages = await browser.pages();
+      const cookiePage = pages[pages.length - 1] || pages[0];
+      await cookiePage.goto(wsUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 3000));
+      const cookies2 = await browser.cookies();
+      atCookie = cookies2.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+      if (atCookie) {
+        log("[COOKIE] ✅ Found after workspace nav: " + atCookie.value.substring(0, 30) + "...");
+        return atCookie;
+      }
+      log("[COOKIE] ❌ Still no access_token cookie after retry");
+    }
+    return null;
+  } catch (e) {
+    log("[COOKIE] ❌ Error: " + e.message.substring(0, 60));
+    return null;
+  }
+}
+
 // ===== Load blocked accounts =====
 function loadBlockedAccounts() {
   if (!fs.existsSync(BLOCKED_FILE)) return new Set();
@@ -140,6 +241,7 @@ function classifyError(errorMsg) {
   if (/ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|net::ERR/i.test(errorMsg)) return "transient";
   if (/timeout|Navigation timeout/i.test(errorMsg)) return "transient";
   if (/No magic link found/i.test(errorMsg)) return "transient";
+  if (/Failed to get both AT and Cookie AT/i.test(errorMsg)) return "transient";
   if (/Failed to get access token/i.test(errorMsg)) return "transient";
   if (/ZO space did not boot/i.test(errorMsg)) return "transient";
   return "transient";
@@ -170,7 +272,7 @@ async function completeRegistration(page, email, log) {
   // Still on /signup, need to complete registration
   log("[REG] Still on /signup, polling for form to render...");
   let handleInput = null;
-  for (let i = 0; i < 300; i++) {  // 5 minutes max
+  for (let i = 0; i < 60; i++) {  // 60s max (1s each)
     await new Promise(r => setTimeout(r, 1000));
     
     // Check URL again (might have redirected during polling)
@@ -374,7 +476,7 @@ async function completeRegistration(page, email, log) {
 // ===== Login + Get AT for one account =====
 async function loginAndGetAT(account, config, log) {
   const { email, clientId, refreshToken } = account;
-  let browser, tempDir;
+  let browser, tempDir, browserPid = null;
   
   try {
     // ★ Acquire browser slot (blocks if MAX_BROWSERS reached)
@@ -385,6 +487,14 @@ async function loginAndGetAT(account, config, log) {
     const launched = await launchBrowser(config, log);
     browser = launched.browser;
     tempDir = launched.tempDir;
+    // ★ Capture PID immediately after launch for reliable cleanup
+    try { 
+      browserPid = browser.process()?.pid; 
+      if (browserPid) {
+        scriptLaunchedPids.push(browserPid);
+        log("[BROWSER] PID captured: " + browserPid + " (tracked: " + scriptLaunchedPids.length + ")"); 
+      }
+    } catch(e) { log("[BROWSER] PID capture failed: " + e.message); }
     const page = launched.page;
     page.setDefaultTimeout(60000);
     await page.setViewport({ width: 1440, height: 900 });
@@ -531,15 +641,118 @@ async function loginAndGetAT(account, config, log) {
     // Give the page a moment to start Turnstile, then poll
     await new Promise(r => setTimeout(r, 1000));
 
-    // Step 5b: Wait for Turnstile auto-solve + auto-redirect
-    // ★ Turnstile extension (world:MAIN, all_frames:true) auto-bypasses CAPTCHA
-    // ★ NO button clicks — page auto-redirects after Turnstile passes
-    log("  Waiting for Turnstile auto-solve + redirect (NO clicks)...");
+    // Step 5b: Wait for Turnstile — extension auto-bypass + active token retrieval
+    // ★ Extension (world:MAIN, all_frames:true) patches screenX/screenY etc.
+    // ★ Also actively call turnstile.reset()/getResponse() + click Continue (same as server.cjs)
+    log("  Waiting for Turnstile (extension + active retrieval)...");
     let redirectDone = false;
+    let clickedContinueOnce = false;
     const startVerifyUrl = page.url();
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 20; i++) {  // 60s max (3s per iteration)
       const txt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
       const url = page.url();
+
+      // ★ Active Turnstile token retrieval (from server.cjs)
+      if (i >= 2 && !clickedContinueOnce) {
+        const turnstileResult = await page.evaluate(() => {
+          // Method 1: turnstile.getResponse()
+          try {
+            if (typeof turnstile !== 'undefined') {
+              const res = turnstile.getResponse();
+              if (res) {
+                const input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) {
+                  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                  setter.call(input, res);
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                return { status: 'ready', tokenLen: res.length };
+              }
+            }
+          } catch (e) {}
+          // Method 2: check hidden input
+          try {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input && input.value) return { status: 'ready', tokenLen: input.value.length };
+          } catch (e) {}
+          // Method 3: check iframe
+          const iframes = document.querySelectorAll('iframe[src*="turnstile"], iframe[src*="challenges"]');
+          if (iframes.length === 0) return { status: 'no_iframe' };
+          return { status: 'pending' };
+        }).catch(() => ({ status: 'unknown' }));
+
+        if (turnstileResult.tokenLen) {
+          log("  [Turnstile] Token obtained! len=" + turnstileResult.tokenLen);
+        }
+        if (i % 5 === 0) log("  [" + (i*3) + "s] Turnstile: " + turnstileResult.status + " | " + txt.substring(0, 50).replace(/\n/g, ' '));
+
+        // ★ Active reset + getResponse (from server.cjs)
+        if (turnstileResult.status === 'pending' && i > 0 && i % 3 === 0) {
+          const resetResult = await page.evaluate(() => {
+            try {
+              if (typeof turnstile !== 'undefined') {
+                turnstile.reset();
+                return new Promise((resolve) => {
+                  let attempts = 0;
+                  const check = () => {
+                    attempts++;
+                    try {
+                      const res = turnstile.getResponse();
+                      if (res) {
+                        const input = document.querySelector('input[name="cf-turnstile-response"]');
+                        if (input) {
+                          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                          setter.call(input, res);
+                          input.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        resolve('got_token');
+                        return;
+                      }
+                    } catch (e) {}
+                    if (attempts < 10) { setTimeout(check, 1000); } else { resolve('timeout'); }
+                  };
+                  setTimeout(check, 2000);
+                });
+              }
+            } catch (e) {}
+            return 'no_turnstile';
+          }).catch(() => 'error');
+          if (resetResult === 'got_token') {
+            log("  [Turnstile] Token obtained via reset+getResponse!");
+          }
+        }
+
+        // ★ Click "Continue in browser" button (from server.cjs)
+        if (!clickedContinueOnce) {
+          const clickedContinue = await page.evaluate(() => {
+            for (const el of document.querySelectorAll("button, a, div[role=button], span")) {
+              const text = el.textContent.trim();
+              if (/Continue in browser/i.test(text) && el.offsetParent !== null) {
+                el.click();
+                return true;
+              }
+            }
+            return false;
+          }).catch(() => false);
+          if (clickedContinue) {
+            log("  Clicked 'Continue in browser' (turnstile=" + turnstileResult.status + ")");
+            clickedContinueOnce = true;
+            await new Promise(r => setTimeout(r, 5000));
+            const afterTxt = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => "");
+            const afterUrl = page.url();
+            if (/choose your handle/i.test(afterTxt)) {
+              log("  Reached handle page after continue!");
+              redirectDone = true;
+              break;
+            }
+            if (/redirecting/i.test(afterTxt)) {
+              log("  Page redirecting after continue (URL: " + afterUrl.substring(0, 70) + ")...");
+              // ★ Don't interrupt - let the page redirect naturally. It takes 10-20s.
+            }
+            continue;
+          }
+        }
+      }
 
       // ★ Check if we landed on main UI (already registered)
       try {
@@ -591,71 +804,41 @@ async function loginAndGetAT(account, config, log) {
 
       // Monitor redirect progress
       if (/redirecting/i.test(txt)) {
-        if (i % 5 === 0) log("  [" + (i*3) + "s] Page redirecting...");
+        if (i % 5 === 0) {
+          log("  [" + (i*3) + "s] Page redirecting... URL: " + page.url());
+          await page.screenshot({ path: "debug_redirecting_" + i + ".png" }).catch(() => {});
+        }
 
-        // ★ Stuck redirect recovery: after 60s, try manual confirm + navigate
-        // (Turnstile typically takes 20-30s to solve; don't interrupt it too early)
-        if (i >= 20 && url.includes('email-login/verify')) {
-          log("  ★ Redirect stuck after 60s, attempting manual confirm...");
-          try {
-            const tokenMatch = url.match(/token=([^&]+)/);
-            if (tokenMatch) {
-              // Call confirm API (POST — GET returns 405 now)
-              const confirmResult = await page.evaluate(async (token) => {
-                try {
-                  const resp = await fetch('/api/email-login/confirm?token=' + token, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-                    body: JSON.stringify({ token }),
-                    credentials: 'include',
-                    redirect: 'follow',
-                  });
-                  return { status: resp.status, ok: resp.ok };
-                } catch(e) { return { error: e.message }; }
-              }, tokenMatch[1]);
-              log("  Confirm API: " + JSON.stringify(confirmResult));
-
-              // Check if access_token cookie was set
-              const cookiesAfterConfirm = await page.cookies();
-              const atCookie = cookiesAfterConfirm.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
-              if (atCookie) {
-                log("  ✅ access_token cookie set after manual confirm!");
-              }
-
-              // Navigate to redirect target (same as zo_register.js)
-              const redirectMatch = url.match(/redirect=([^&]+)/);
-              const redirectTarget = redirectMatch ? decodeURIComponent(redirectMatch[1]) : '/signup';
-              log("  Navigating to: " + redirectTarget);
-              try {
-                await page.goto('https://www.zo.computer' + redirectTarget, { waitUntil: 'domcontentloaded', timeout: 30000 });
-              } catch(navErr) {
-                log("  Nav: " + navErr.message.substring(0, 50));
-              }
-              await new Promise(r => setTimeout(r, 3000));
+        // ★ Stuck redirect recovery
+        if (i >= 10 && url.includes('email-login/verify')) {
+          const recoveryCookie = await page.cookies();
+          const recoveryAT = recoveryCookie.find(c => c.name === 'access_token' && c.domain.includes('zo.computer'));
+          
+          // Fast-fail: 30s with no cookie = token was never verified, abort now
+          if (i >= 10 && !recoveryAT) {
+            log("  ❌ Fast-fail after 30s: no access_token cookie set (token never verified).");
+            throw new Error("Login token not verified (no access_token cookie after 30s)");
+          }
+          
+          if (recoveryAT) {
+            if (i === 10) log("  ✅ access_token cookie present! Trying direct workspace navigation...");
+            const guessedHandle = email.replace(/@.*/, '').replace(/[^a-z0-9]/g, '').substring(0, 15);
+            const wsUrl = 'https://' + guessedHandle + '.zo.computer/_boot';
+            try {
+              await page.goto(wsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              await new Promise(r => setTimeout(r, 2000));
               const afterNavUrl = page.url();
-              log("  After nav: " + afterNavUrl);
-
-              // Check for subdomain (already registered)
-              try {
-                const hn3 = new URL(afterNavUrl).hostname;
-                if (hn3.endsWith('.zo.computer') && hn3 !== 'www.zo.computer') {
-                  log("  ✅ Already registered! At subdomain: " + afterNavUrl);
-                  redirectDone = true;
-                  break;
-                }
-              } catch(e) {}
-
-              // Check if redirect succeeded
-              if (/zo\.computer/.test(afterNavUrl) && !/verify|email-login/i.test(afterNavUrl)) {
-                log("  ✅ Redirect done after manual confirm!");
+              if (afterNavUrl.includes(guessedHandle + '.zo.computer')) {
+                log("  ✅ Reached workspace via direct navigation!");
                 redirectDone = true;
                 break;
               }
+            } catch(navErr) {
+              if (i === 10) log("  Direct nav error: " + navErr.message.substring(0, 50));
             }
-          } catch(recoverErr) {
-            log("  Recovery error: " + recoverErr.message.substring(0, 60));
+          } else if (i === 10) {
+            log("  ⚠️ No cookie after 30s. Fast-failing now.");
           }
-          break; // Only attempt recovery once
         }
       }
 
@@ -663,7 +846,7 @@ async function loginAndGetAT(account, config, log) {
     }
 
     if (!redirectDone) {
-      throw new Error("Login redirect did not complete (180s timeout)");
+      throw new Error("Login redirect did not complete (60s timeout)");
     }
 
     // ★ Check if page is on /signup (needs registration completion)
@@ -1060,23 +1243,68 @@ async function loginAndGetAT(account, config, log) {
       log("  Current URL: " + page.url().substring(0, 80));
     }
 
-    // === Get Access Token ===
-    const accessToken = await fetchAccessToken(page, handle, config, log);
-    
-    if (accessToken) {
-      // Save AT
-      const atFile = path.join(AT_DIR, email + ".txt");
-      const content = `email: ${email}\nhandle: ${handle}\nzoAddress: ${handle}.zo.computer\naccessToken: ${accessToken}\ntime: ${new Date().toISOString()}\n`;
-      fs.writeFileSync(atFile, content, "utf8");
-      log("✅ AT saved: " + atFile);
-      
-      // Append to results
-      const resultLine = JSON.stringify({ email, handle, accessToken: accessToken.substring(0, 20) + "...", time: new Date().toISOString(), status: "success" }) + "\n";
-      fs.appendFileSync(RESULTS_FILE, resultLine, "utf8");
-      
-      return { email, handle, accessToken, status: "success" };
+    // === Get Credentials (AT + Cookie AT) ===
+    const needZoAT = !hasAT(email);
+    const needCookieAT = !hasCookieAT(email);
+    log("[CRED] Need zo_sk AT: " + needZoAT + " | Need Cookie AT: " + needCookieAT);
+
+    let accessToken = null;
+    let cookieATValue = null;
+
+    // Step A: Get Cookie AT first (while still on workspace, cookies are fresh)
+    if (needCookieAT) {
+      log("[COOKIE] Extracting Cookie AT from browser...");
+      const cookie = await getCookieATFromBrowser(browser, handle, log);
+      if (cookie && cookie.value) {
+        cookieATValue = cookie;
+        saveCookieAT(email, handle, cookie, log);
+      } else {
+        log("[COOKIE] ⚠️ Could not extract Cookie AT (will retry after AT fetch)");
+      }
     } else {
-      throw new Error("Failed to get access token");
+      log("[COOKIE] Already have Cookie AT, skipping");
+    }
+
+    // Step B: Get zo_sk AT (Settings → Advanced → Create API Key)
+    if (needZoAT) {
+      log("[AT] Fetching zo_sk API key...");
+      accessToken = await fetchAccessToken(page, handle, config, log);
+      if (accessToken) {
+        const atFile = path.join(AT_DIR, email + ".txt");
+        const content = `email: ${email}\nhandle: ${handle}\nzoAddress: ${handle}.zo.computer\naccessToken: ${accessToken}\ntime: ${new Date().toISOString()}\n`;
+        fs.writeFileSync(atFile, content, "utf8");
+        log("✅ AT saved: " + atFile);
+      } else {
+        log("[AT] ⚠️ Failed to get zo_sk API key");
+      }
+    } else {
+      log("[AT] Already have zo_sk AT, skipping");
+    }
+
+    // Step C: Retry Cookie AT if first attempt failed (navigating to settings may have refreshed cookies)
+    if (needCookieAT && !cookieATValue) {
+      log("[COOKIE] Retrying Cookie AT extraction...");
+      const cookie2 = await getCookieATFromBrowser(browser, handle, log);
+      if (cookie2 && cookie2.value) {
+        cookieATValue = cookie2;
+        saveCookieAT(email, handle, cookie2, log);
+      } else {
+        log("[COOKIE] ❌ Cookie AT extraction failed after retry");
+      }
+    }
+
+    // === Result ===
+    if (accessToken || cookieATValue) {
+      const resultLine = JSON.stringify({
+        email, handle,
+        accessToken: accessToken ? accessToken.substring(0, 20) + "..." : null,
+        cookieAT: cookieATValue ? cookieATValue.value.substring(0, 30) + "..." : null,
+        time: new Date().toISOString(), status: "success"
+      }) + "\n";
+      fs.appendFileSync(RESULTS_FILE, resultLine, "utf8");
+      return { email, handle, accessToken, cookieAT: cookieATValue?.value, status: "success" };
+    } else {
+      throw new Error("Failed to get both AT and Cookie AT");
     }
 
   } catch (e) {
@@ -1098,21 +1326,25 @@ async function loginAndGetAT(account, config, log) {
     
     return { email, error: e.message, status };
   } finally {
-    // ★ Close browser and kill its process tree (only script-launched browser)
+    // ★ ALWAYS close the browser and KILL its entire process tree
     if (browser) {
       try {
-        const pid = browser.process()?.pid;
-        if (pid) {
-          scriptLaunchedPids.push(pid);
+        // Fallback: if PID wasn't captured at launch, get it now
+        let pid = browserPid;
+        if (!pid) {
+          try { pid = browser.process()?.pid; } catch(e) {}
         }
-        await browser.close();
         if (pid) {
-          try { execSync(`taskkill /F /T /PID ${pid} 2>nul`, { stdio: "ignore" }); } catch(e) {}
-          // Also try matching child processes by parent PID
-          try { execSync(`wmic process where (ParentProcessId=${pid}) delete 2>nul`, { stdio: "ignore" }); } catch(e) {}
+          killProcessTree(pid);
+          // Remove from global tracker
+          const idx = scriptLaunchedPids.indexOf(pid);
+          if (idx >= 0) scriptLaunchedPids.splice(idx, 1);
         }
+        await browser.close().catch(() => {});
+        // Second pass: catch stragglers spawned during close()
+        await new Promise(r => setTimeout(r, 3000));
+        if (pid) killProcessTree(pid);
       } catch(e) {}
-      await new Promise(r => setTimeout(r, 1000));
     }
     // ★ Aggressive temp dir cleanup (retries)
     cleanupTempDir(tempDir);
@@ -1133,18 +1365,31 @@ async function main() {
   const accounts = parseAccounts(ZO_FILE);
   console.log("Total accounts in zo.txt: " + accounts.length);
 
-  // Check existing ATs
+  // Check existing ATs and Cookie ATs
   const existingATs = getExistingATs();
-  console.log("Already have AT: " + existingATs.size);
+  console.log("Already have AT (zo_sk): " + existingATs.size);
 
-  // Filter accounts that need AT
-  const needAT = accounts.filter(a => !existingATs.has(a.email));
-  console.log("Need AT: " + needAT.length);
+  // Count existing Cookie ATs
+  let existingCookieATs = new Set();
+  if (fs.existsSync(COOKIE_AT_DIR)) {
+    existingCookieATs = new Set(fs.readdirSync(COOKIE_AT_DIR).filter(f => f.endsWith(".txt")).map(f => f.replace(".txt", "")));
+  }
+  console.log("Already have Cookie AT: " + existingCookieATs.size);
 
-  if (needAT.length === 0) {
-    console.log("All accounts already have AT!");
+  // Filter accounts that need either AT or Cookie AT
+  const needWork = accounts.filter(a => !existingATs.has(a.email) || !existingCookieATs.has(a.email));
+  const needBoth = needWork.filter(a => !existingATs.has(a.email) && !existingCookieATs.has(a.email)).length;
+  const needOnlyCookie = needWork.filter(a => existingATs.has(a.email) && !existingCookieATs.has(a.email)).length;
+  const needOnlyAT = needWork.filter(a => !existingATs.has(a.email) && existingCookieATs.has(a.email)).length;
+  console.log("Accounts needing work: " + needWork.length + " (both: " + needBoth + ", only Cookie AT: " + needOnlyCookie + ", only zo_sk AT: " + needOnlyAT + ")");
+
+  if (needWork.length === 0) {
+    console.log("All accounts already have both AT and Cookie AT!");
     return;
   }
+
+  // Alias for backward compat
+  const needAT = needWork;
 
   // Config
   const config = {
@@ -1154,8 +1399,9 @@ async function main() {
     fetchAccessToken: true,
   };
 
-  // Ensure AT directory exists
+  // Ensure AT and Cookie AT directories exist
   if (!fs.existsSync(AT_DIR)) fs.mkdirSync(AT_DIR, { recursive: true });
+  if (!fs.existsSync(COOKIE_AT_DIR)) fs.mkdirSync(COOKIE_AT_DIR, { recursive: true });
 
   if (mode === "single") {
     // Single-threaded: process one by one
@@ -1204,10 +1450,10 @@ async function main() {
         
         const { account, retries } = task;
         
-        // ★ Dynamic AT check before starting
-        if (hasAT(account.email)) {
+        // ★ Dynamic check: skip only if BOTH credentials are obtained
+        if (hasAT(account.email) && hasCookieAT(account.email)) {
           skipped++;
-          console.log(`[W${workerId}] ⏭️ Skipped (already has AT): ${account.email.substring(0, 30)}`);
+          console.log(`[W${workerId}] ⏭️ Skipped (has both AT + Cookie AT): ${account.email.substring(0, 30)}`);
           continue;
         }
         
@@ -1262,7 +1508,7 @@ async function main() {
           }
         }
         
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
       }
       console.log(`[Worker ${workerId}] No more tasks, exiting.`);
     }
@@ -1272,8 +1518,8 @@ async function main() {
     for (let i = 0; i < concurrency; i++) {
       workers.push(worker(i + 1));
       if (i < concurrency - 1) {
-        console.log(`  Worker ${i+1} started, waiting 2s before worker ${i+2}...`);
-        await new Promise(r => setTimeout(r, 2000));
+        console.log(`  Worker ${i+1} started, waiting 1s before worker ${i+2}...`);
+        await new Promise(r => setTimeout(r, 1000));
       }
     }
     
@@ -1294,10 +1540,18 @@ async function main() {
     console.log(`⚠️ Blocked: ${blocked.length}`);
     console.log(`⏭️ Skipped: ${skipped}`);
     
+    // Count final credential totals
+    const finalATs = fs.existsSync(AT_DIR) ? fs.readdirSync(AT_DIR).filter(f => f.endsWith(".txt")).length : 0;
+    const finalCookieATs = fs.existsSync(COOKIE_AT_DIR) ? fs.readdirSync(COOKIE_AT_DIR).filter(f => f.endsWith(".txt")).length : 0;
+    console.log(`\n📊 Final totals: zo_sk AT: ${finalATs} | Cookie AT: ${finalCookieATs}`);
+    const atGot = success.filter(r => r.accessToken).length;
+    const cookieGot = success.filter(r => r.cookieAT).length;
+    console.log(`   This run: zo_sk AT +${atGot} | Cookie AT +${cookieGot}`);
+    
     if (success.length > 0) {
       console.log(`\n成功账号:`);
       for (const r of success) {
-        console.log(`  ✅ ${r.email} (${r.handle})`);
+        console.log(`  ✅ ${r.email} (${r.handle})${r.accessToken ? ' [AT]' : ''}${r.cookieAT ? ' [CookieAT]' : ''}`);
       }
     }
     if (fail.length > 0) {

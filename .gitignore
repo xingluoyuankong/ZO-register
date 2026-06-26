@@ -50,6 +50,19 @@ plugin/integrate_tempmail.js
 
 # Legacy root-level scripts (keep for reference but don't track changes)
 # These are old iterations kept locally only
+turnstile-patch.js
+
+# History / backup directories (local only, NOT pushed to GitHub)
+archive/
+_历史版本/
+_整理后备份/
+
+# Diagnostic analysis docs (local only)
+TURNSTILE_BLOCKING_ANALYSIS.md
+TURNSTILE_FIX_AND_FLOW.md
+
+# SystemB keepalive legacy scripts (local only)
+keepalive-scripts/
 
 # Debug screenshots & data
 *.png
