@@ -167,12 +167,25 @@ async function findMagicLink(accessToken, afterTime, log, config) {
     const rawLinks = combined.match(/https?:\/\/[^\s"'<>]*zo\.computer[^\s"'<>]*/gi) || [];
     const allZoLinks = [...hrefLinks.map(h => h.replace(/^href=["']/i, "").replace(/["']$/, "")), ...rawLinks];
 
+    // First pass: find non-API ZO link (prefer webpage URL over API endpoint)
+    let fallbackApiLink = null;
     for (let link of allZoLinks) {
       link = link.replace(/[)\]>,;!?\s]+$/, "").replace(/&amp;/g, "&").replace(/&#38;/g, "&").replace(/&#61;/g, "=");
       if (/token=|verify|login|sign|email-login/i.test(link)) {
+        if (/\/api\//i.test(link)) {
+          fallbackApiLink = link;
+          continue;
+        }
         log("  [MAIL] ✅ ZO link found!");
         return link;
       }
+    }
+    if (fallbackApiLink) {
+      // Convert API endpoint URL to web page URL
+      // /api/email-login/verify?redirect=...&token=... → /email-login/verify?token=...&redirect=...
+      const webUrl = fallbackApiLink.replace(/\/api\//i, "/");
+      log("  [MAIL] ⚠️ Only API link found, converted to web URL: " + webUrl.substring(0, 80));
+      return webUrl;
     }
 
     // Fallback: any link with token= that looks like a verification link

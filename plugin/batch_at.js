@@ -784,6 +784,41 @@ async function loginAndGetAT(account, config, log) {
         break;
       }
 
+      // ★ Fix: verify page for new users — fetch API endpoint to set cookie, then navigate to signup
+      // ZO emails now only contain /api/email-login/verify URLs. The web page at /email-login/verify
+      // doesn't auto-verify. We need to fetch the API endpoint which sets the access_token cookie.
+      if (i >= 2 && /email-login\/verify/i.test(url) && (/%2Fsignup/i.test(url) || /redirect=/i.test(url))) {
+        const verifyUrl = page.url();
+        // Extract token from the URL and construct API URL
+        const tokenMatch = verifyUrl.match(/[?&]token=([^&]+)/);
+        const redirectMatch = verifyUrl.match(/[?&]redirect=([^&]+)/);
+        if (tokenMatch) {
+          const apiUrl = "https://www.zo.computer/api/email-login/verify?token=" + tokenMatch[1]
+            + (redirectMatch ? "&redirect=" + redirectMatch[1] : "");
+          log("  🔀 Fetching verify API to set cookie...");
+          try {
+            const fetchResult = await page.evaluate(async (url) => {
+              const resp = await fetch(url, {
+                method: "GET",
+                credentials: "include",
+                redirect: "follow",
+              });
+              return { ok: resp.ok, status: resp.status, url: resp.url };
+            }, apiUrl).catch(() => null);
+            if (fetchResult && fetchResult.ok) {
+              log("  ✅ Verify API OK (" + fetchResult.status + "), final URL: " + (fetchResult.url || "").substring(0, 70));
+              // Navigate to signup — the API response should have set the cookie
+              await page.goto("https://www.zo.computer/signup", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 2000));
+            } else {
+              log("  ⚠️ Verify API failed: " + JSON.stringify(fetchResult));
+            }
+          } catch(e) {
+            log("  ⚠️ Verify API error: " + (e.message || "").substring(0, 80));
+          }
+        }
+      }
+
       // ★ Check if we're on /signup with registration form (redirect completed back to signup)
       if (/\/signup/i.test(url) && !/email-login|verify/i.test(url)) {
         const hasRegForm = /choose.*handle|set up.*computer|handle.*zo\.computer/i.test(txt);

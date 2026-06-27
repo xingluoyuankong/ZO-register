@@ -1,443 +1,309 @@
-# ZO Computer 批量凭证获取工具 — Turnstile 破解完整方案
+# ZO Computer 批量凭证获取工具
 
-> **当前版本：V1.0 (2026-06-27)**
-> 
-> 自动化绕过 Cloudflare Turnstile 人机验证，批量获取 ZO Computer 账号的 Access Token + Cookie AT 双凭证。
+> **版本 V1.0 | 2026-06-27 | 已验证跑通 ✅**
+>
+> 自动登录 ZO Computer → Turnstile 人机验证绕过 → ZO Space 唤醒 → 提取双凭证（Access Token + Cookie AT）
 >
 > GitHub: `https://github.com/xingluoyuankong/ZO-register.git`
 
 ---
 
-## 📦 核心文件清单（仅保留跑通版本）
+## ⚡ 快速上手
 
+只要一行命令：
+
+```powershell
+cd E:\API获取工具\ZO注册\plugin
+node batch_at.js parallel 4
 ```
-ZO注册/
-├── plugin/                          # 🔴 核心运行目录
-│   ├── batch_at.js                  # 批量 AT 获取主脚本（支持 4 并发，30s fast-fail）
-│   ├── zo_register.js               # 核心库：浏览器启停、邮箱轮询、AT 提取
-│   ├── smart_fetch.js               # 智能凭证获取器（按状态跳过已完成步骤）
-│   ├── server.js                    # Web UI（Express + WebSocket）
-│   ├── config.json                  # 运行配置
-│   └── start.bat                    # 一键启动
-├── turnstile-extension/             # 🔴 Cloudflare Turnstile 绕过扩展 V4
-│   ├── manifest.json                # MV3 清单：all_frames + world=MAIN + document_start
-│   └── script.js                    # 10 层反检测补丁（核心）
-├── extension/                       # 备用 Chrome 扩展注册方案（系统B）
-├── registered/                      # 🔴 凭证输出目录
-│   ├── Access Tokens/               # zo_sk AT 文件（每个账号一个 txt）
-│   └── Cookie ATs/                  # Cookie AT 文件（每个账号一个 txt）
-├── archive/                         # ⚠️ 仅备份，不用于运行
-├── _历史版本/                        # ⚠️ 旧版本备份
-├── _整理后备份/                       # ⚠️ 整理前备份
-├── test/                            # ⚠️ 诊断/验证脚本
-├── keepalive-scripts/               # 辅助脚本
-├── node_modules/                    # npm 依赖
-├── key/                             # 密钥
-├── public/                          # Web UI 静态文件
-├── README.md                        # 本文档
-├── GUIDE.md                         # 使用指南
-├── config.json                      # 全局配置
-├── package.json                     # 项目配置
-├── start.bat                        # 启动脚本
-└── .gitignore                       # Git 忽略规则
+
+**就会发生的事情**：
+1. 读取 `C:\Users\XZXyuan\Downloads\zo_all.txt` 里的所有账号
+2. 跳过已经有双凭证的账号（不重复工作）
+3. 启动最多 4 个 Edge 浏览器并发处理
+4. 对每个缺凭证的账号：登录 → Turnstile 绕过 → Space 唤醒 → 提取 AT
+5. Cookie AT 保存到 `registered\Cookie ATs\`，zo_sk AT 保存到 `registered\Access Tokens\`
+
+**想先只跑一个账号验证？**：
+```powershell
+cd E:\API获取工具\ZO注册\plugin
+node batch_at.js single
 ```
 
 ---
 
-## 🔑 Turnstile 人机验证 — 完整破解原理
+## 🚀 启动什么程序（一图看懂）
 
-### 检测机制（逆向分析）
+| 我想... | 运行这个 | 在哪 |
+|---------|----------|------|
+| **批量获取所有账号凭证**（日常用） | `node batch_at.js parallel 4` | `plugin/` |
+| **单账号验证**（测试用） | `node batch_at.js single` | `plugin/` |
+| **只看哪些账号缺什么凭证**（不运行浏览器） | `node smart_fetch.js` | `plugin/` |
+| **Turnstile 扩展加载检测** | `node test/smoke_test.js` | `test/` |
+| **批量只获取 Cookie AT**（旧版，不推荐） | `node batch_cookie_at.js` | `plugin/` |
+| **浏览器手动注册**（备用） | Chrome 加载 `extension/` | `extension/` |
 
-Cloudflare Turnstile 通过以下多层向量判定是否为机器人：
+> ⚠️ **不要运行的文件**：`test/` 下 40+ 个文件是**诊断脚本**（调试时写的），`server.cjs`、`plugin/server.js` 是旧版 Web UI，均已废弃。`turnstile-patch.js`（根目录）是已经整合进扩展的旧补丁，单独无作用。
 
-| 检测层 | 检测内容 | 判定标准 |
-|--------|---------|---------|
-| L1 - MouseEvent | `screenX` vs `clientX` | `screenX === clientX` → 100% 机器人（正常用户有窗口偏移）|
-| L2 - PointerEvent | 同 MouseEvent 逻辑 | 同上 |
-| L3 - navigator.webdriver | `navigator.webdriver` 属性 | `true` → 自动化工具 |
-| L4 - navigator.userAgentData | UA brands/mobile/platform | 不匹配真实浏览器 → bot |
-| L5 - canvas 指纹 | `toDataURL` 哈希一致性 | 相同 → bot（bot 的 canvas 指纹不波动）|
-| L6 - WebGL 指纹 | `RENDERER`/`VENDOR` 字符串 | 与浏览器 claim 不匹配 → bot |
-| L7 - plugins | `navigator.plugins` 长度 | 0 → headless 浏览器 |
-| L8 - chrome.runtime | `chrome` 对象 | 缺失 → headless（非 Chrome）|
-| L9 - cdc_ 属性 | `cdc_adoQpoasnfa76pfcZLmcfl_*` | 存在 → Puppeteer/Playwright 痕迹 |
-| L10 - Shadow DOM | Turnstile widget 内 iframe | 通过 Shadow DOM 检测注入痕迹 |
+---
 
-### 破解方案 V4：Chrome MV3 扩展
+## 📂 所有程序功能和文件位置
 
-**为什么不能用 `evaluateOnNewDocument`？**
-- CDP 的 `evaluateOnNewDocument` 只在主 frame 注入
-- Turnstile 的 checkbox 和 challenge 都运行在 Shadow DOM 内的 iframe 中
-- 主 frame 的补丁**根本进不去** iframe，Turnstile 仍检测到 `screenX === clientX`
-- 只有 Chrome 扩展的 `"all_frames": true` + `"world": "MAIN"` 配置能穿透到所有 iframe
+### 🔴 核心运行程序（这些才是真的在用的）
 
-**V4 扩展架构：**
+| 文件 | 位置 | 功能 | 运行方式 |
+|------|------|------|----------|
+| **`batch_at.js`** | `plugin/` | 🔴 **主脚本**。批量获取 AT，支持并发、自动补位、fast-fail。 | `node batch_at.js parallel 4` |
+| **`zo_register.js`** | `plugin/` | 🔴 **核心库**。所有函数：浏览器启动、邮箱轮询、Turnstile 交互、AT 提取。 | 被 batch_at.js require()，不单独运行 |
+| **`smart_fetch.js`** | `plugin/` | 🔴 **凭证状态扫描器**。扫 zo_all.txt，告诉每个账号缺什么凭证。 | `node smart_fetch.js` |
+| **`turnstile-extension/manifest.json`** | `turnstile-extension/` | 🔴 Turnstile V4 扩展清单（MV3, all_frames, world=MAIN）。 | 被 batch_at.js 自动加载 |
+| **`turnstile-extension/script.js`** | `turnstile-extension/` | 🔴 Turnstile V4 10层反检测补丁。 | 被 Edge 浏览器自动注入 |
+| **`config.json`** | `plugin/` | 🔴 运行配置（emailDir、browserType、并发）。 | 被 zo_register.js 读取 |
+
+### 🟡 备用/辅助程序
+
+| 文件 | 位置 | 功能 | 状态 |
+|------|------|------|------|
+| `batch_cookie_at.js` | `plugin/` | 只获取 Cookie AT（旧方案） | ⚠️ 已被 batch_at.js 替代，别用它 |
+| `batch_register.js` | `plugin/` | 批量注册脚本（早期版本） | ⚠️ 已废弃 |
+| `boot_workspace.js` | `plugin/` | 单次 ZO Space 唤醒脚本 | ⚠️ 已整合进 batch_at.js |
+| `extension/` | 根目录 | Chrome MV3 扩展（手动注册用） | 🟡 备用，日常不用 |
+| `server.cjs` | 根目录 | Web UI 服务端（Express） | ⚠️ 旧版，已废弃 |
+| `plugin/server.js` | `plugin/` | Web UI 服务端（新版） | ⚠️ 旧版，已废弃 |
+| `turnstile-patch.js` | 根目录 | Turnstile 旧补丁 | ⚠️ 已整合进 turnstile-extension/script.js，单独用无效 |
+| `start.bat` | 根目录 + `plugin/` | 快捷启动脚本 | ⚠️ 指向已废弃程序 |
+
+### 📁 输出/数据目录
+
+| 目录 | 说明 |
+|------|------|
+| `registered/Access Tokens/` | 🔴 **zo_sk AT 输出**。每个账号一个 txt，文件名 `邮箱.txt` |
+| `registered/Cookie ATs/` | 🔴 **Cookie AT 输出**。每个账号一个 txt，文件名 `邮箱.txt` |
+
+### 🧪 test/ 目录（诊断脚本 — 不需要碰）
+
+test/ 下有 40+ 个文件。**真正有用的只有这几个**：
+
+| 文件 | 功能 |
+|------|------|
+| `smoke_test.js` | Turnstile 扩展加载检测 + ZO 页面加载验证 |
+| `turnstile_v4_verify.js` | Turnstile V4 补丁激活验证 |
+| 其余 35+ 个 `*.js` | 🔴 调试用的诊断脚本，**不要运行也不要去看** |
+
+test/ 下还有大量日志文件（`logs/`）和截图（`*.png`），均为历史调试产物。
+
+---
+
+## ⚠️ 容易搞混的文件
+
+**这些文件名字像、位置近，但功能不同——容易拿错！**
+
+### 搞混 #1：两个 config.json
+
+```
+📁 E:\API获取工具\ZO注册\config.json        → 全局配置（基本不用）
+📁 E:\API获取工具\ZO注册\plugin\config.json  → 🔴 真正生效的配置！改这个！
+```
+
+### 搞混 #2：两个 server
+
+```
+📁 E:\API获取工具\ZO注册\server.cjs              → 旧版 Web UI 服务端
+📁 E:\API获取工具\ZO注册\plugin\server.js         → 新版 Web UI 服务端
+⚠️ 两个都废弃了，都不需要！
+```
+
+### 搞混 #3：三个 "batch" 脚本
+
+```
+📁 plugin\batch_at.js           → 🔴 主脚本：获取全量双凭证（用这个！）
+📁 plugin\batch_cookie_at.js    → ⚠️ 旧版：只获取 Cookie AT（别用）
+📁 plugin\batch_register.js     → ⚠️ 旧版：批量注册（已废弃）
+```
+
+### 搞混 #4：两个 Turnstile 扩展目录
+
+```
+📁 turnstile-extension\   → 🔴 V4 反检测扩展（被 batch_at.js 自动加载）
+📁 extension\              → 🟡 系统B：手动注册用 Chrome MV3 扩展
+```
+**核心区别**：`turnstile-extension/` 用 `world: "MAIN"` 注入主环境（补丁真正生效），`extension/` 用 `isolated world`（被 Turnstile 绕过）。日常批量获取 AT 用的是 `turnstile-extension/`。
+
+### 搞混 #5：三个注册相关脚本
+
+```
+📁 plugin\zo_register.js       → 🔴 核心库函数（被 batch_at.js 调用）
+📁 plugin\batch_register.js    → ⚠️ 旧版批量注册（已废弃）
+📁 plugin\boot_workspace.js    → ⚠️ 旧版单次唤醒（已整合）
+```
+
+### 搞混 #6：两个 start.bat
+
+```
+📁 ZO注册\start.bat             → 根目录启动脚本（指向旧程序）
+📁 ZO注册\plugin\start.bat      → plugin 目录启动脚本（指向旧程序）
+⚠️ 两个都指向已废弃的 server，不要用。现代启动方式就是 node batch_at.js parallel 4。
+```
+
+### 搞混 #7：plugin 里的调试截图
+
+```
+plugin\debug_before_continue.png   ← 脚本自动截的
+plugin\debug_after_continue.png    ← 脚本自动截的
+plugin\debug_redirecting_*.png     ← 脚本自动截的（10个）
+```
+这些都是脚本运行过程中自动保存的调试截图。**无害，不需要手动删**，但如果积太多可以清掉。
+
+---
+
+## 📊 凭证格式与账号管理
+
+### 账号文件 (zo_all.txt)
+
+位置：`C:\Users\XZXyuan\Downloads\zo_all.txt`
+
+格式（4段，用 `----` 分隔）：
+```
+outlook邮箱----密码----AzureClientId----RefreshToken
+```
+
+示例：
+```
+fishhenrk@outlook.com----Password123----14d82eec-xxxx-xxxx-xxxx-xxxxxxxxxxxx----0.ARwA...（长token）
+```
+
+### 两种凭证
+
+| 凭证 | 格式 | 位置 | 获取方式 |
+|------|------|------|----------|
+| **Cookie AT** | JWT (eyJ...长字符串) | `registered/Cookie ATs/邮箱.txt` | 登录后从浏览器 cookie `access_token` 直接读取 |
+| **zo_sk AT** | `zo_sk_` 开头 49 字符 | `registered/Access Tokens/邮箱.txt` | 进入 Settings → Advanced → 创建 API Key |
+
+### smart_fetch.js 输出解读
+
+```
+fishhenrk@outlook.com        → both            # 双凭证齐全，跳过
+hendrick@outlook.com         → needCookie      # 有 zo_sk AT，缺 Cookie AT
+alexchen@outlook.com         → needAPI         # 有 Cookie AT，缺 zo_sk AT
+newuser@outlook.com          → needBoth        # 两样都没有
+```
+
+---
+
+## 🔑 Turnstile 人机验证 — 破解原理
+
+### Cloudflare Turnstile 检测向量（10层）
+
+| 层 | 检测内容 | 判定标准 |
+|----|---------|---------|
+| L1 | `MouseEvent.screenX` vs `clientX` | `screenX === clientX` → 机器人（正常用户有窗口偏移 80-400px）|
+| L2 | `PointerEvent.screenX/Y` | 同 L1 |
+| L3 | `navigator.webdriver` | `true` → Puppeteer/Playwright |
+| L4 | `navigator.userAgentData` | brands/mobile/platform 不匹配真实浏览器 |
+| L5 | Canvas `toDataURL` 哈希 | 完全一致 → 无波动 → bot |
+| L6 | WebGL `RENDERER`/`VENDOR` | 不匹配浏览器声明 |
+| L7 | `navigator.plugins.length` | `0` → headless |
+| L8 | `chrome.runtime` | 缺失 → 非 Chrome/Edge 环境 |
+| L9 | `cdc_*` 属性 | 存在 → Puppeteer/Playwright 痕迹 |
+| L10 | Shadow DOM 内 iframe | Turnstile widget 在 Shadow DOM 的 iframe 里 |
+
+### 为什么 CDP `evaluateOnNewDocument` 不够
+
+CDP 只往**主 frame** 注入。Turnstile widget 运行在 Shadow DOM 内的 **iframe** 中，主 frame 的补丁根本进不去。**Chrome MV3 扩展的 `"all_frames": true` + `"world": "MAIN"` 是唯一能穿透的方案。**
+
+### V4 扩展（`turnstile-extension/`）
 
 ```json
-// manifest.json
 {
   "manifest_version": 3,
   "content_scripts": [{
     "js": ["./script.js"],
     "matches": ["<all_urls>"],
-    "run_at": "document_start",   // ← 在页面任何 JS 之前注入
-    "all_frames": true,            // ← 注入到所有 iframe（关键！）
-    "world": "MAIN"                // ← 运行在主 JS 环境（非 isolated）
+    "run_at": "document_start",   // 页面任何 JS 之前注入
+    "all_frames": true,            // 注入所有 iframe（含 Shadow DOM）
+    "world": "MAIN"                // 主 JS 环境（非 isolated world）
   }]
 }
 ```
 
-**10 层反检测补丁（script.js）：**
-
-```
-L1:  MouseEvent.screenX = clientX + random(80~480) + jitter(±2)
-     MouseEvent.screenY = clientY + random(60~260) + jitter(±2)
-     → 每帧独立随机偏移量，避免模式检测
-     
-L2:  PointerEvent.screenX/screenY（Turnstile 也检测 PointerEvent）
-
-L3:  window.outerWidth/Height 伪装（仅顶层窗口）
-     → outerWidth = innerWidth + 16（chrome 窗口 chrome）
-
-L4:  navigator.webdriver = undefined（基础）
-     Navigator.prototype.webdriver = false（双重覆盖）
-
-L5:  navigator.userAgentData → Chrome 131/Win/x86_64 伪装
-     → 包括 brands、mobile、platform、getHighEntropyValues
-
-L6:  navigator.plugins → 3 个真实插件 + PluginArray.prototype
-     → item/namedItem/refresh/Symbol.iterator 全模拟
-
-L7:  chrome.runtime → 完整 connect/sendMessage 补全
-
-L8:  Canvas toDataURL → 最低位随机翻转（每次略有不同）
-
-L9:  WebGL UNMASKED_VENDOR → 'Intel Inc.'
-     UNMASKED_RENDERER → 'Intel Iris OpenGL Engine'
-
-L10: cdc_ 开头的全局属性→ 逐一删除
-     attachShadow → 记录 closed Shadow DOM 引用
-     permissions.query → 拦截 notifications 查询
-```
-
-**V4 关键修复（vs V3）：**
-- ⭐ **移除了 CF iframe 守卫**：V3 在 iframe 内跳过 screenX/Y 补丁（只修复 webdriver），这是**致命缺陷** — Turnstile 100% 判定为机器人
-- **增加 userAgentData 补丁**：来自 grok-register-main 成熟方案，2026 年 CF 头号检测向量
-- **Canvas/WebGL 噪声**：进一步降低指纹一致性
+script.js 做 10 件事：
+1. MouseEvent/PointerEvent screenX/Y 每帧随机偏移
+2. navigator.webdriver 双重抹除
+3. userAgentData 伪装 Chrome 131
+4. plugins 数组伪造
+5. chrome.runtime 完整补全
+6. Canvas 指纹最低位随机翻转
+7. WebGL 指纹 Intel 模拟
+8. cdc_ 属性逐一删除
+9. attachShadow 追踪封闭 Shadow DOM
+10. permissions.query 拦截通知查询
 
 ---
 
-## 🔄 完整流程
+## 🕳️ 踩坑记录（19 个）
 
-### 凭证获取流程 (batch_at.js)
-
-```
-读取 zo.txt（223 账号，格式：邮箱----密码----clientId----refreshToken）
-    ↓
-检查已有 AT（zo_sk + Cookie AT），跳过已完成账号
-    ↓
-并发启动 ≤4 个浏览器（信号量控制 MAX_BROWSERS=4）
-    ↓
-对每个账号：
-    ├─ Step 1: 打开 https://www.zo.computer/signup
-    ├─ Step 2: 点击 "Email me a sign-up link"
-    ├─ Step 3: 填写 Outlook 邮箱，提交
-    ├─ Step 4: Microsoft Graph API 轮询收件箱 → 提取 magic link
-    ├─ Step 5: 打开 magic link → Turnstile 扩展自动破解
-    │    ├─ ⚡ 快速路径：直接跳转到 workspace（已注册）
-    │    ├─ 🐌 慢速路径：等 verify 页自跳转（10-20s）
-    │    └─ ❌ 死路径：30s 无 cookie → fast-fail
-    ├─ 检测 handle（URL 子域或 "Go to your Zo" 链接）
-    ├─ 导航到 handle.zo.computer/_boot → 检测空间状态
-    ├─ Dormant 状态 → 等待唤醒（ZO Space boot）
-    ├─ 进入活跃 workspace → 等待 chat 准备就绪
-    └─ 提取凭证：
-         ├─ Cookie AT：从浏览器 cookies 读取 access_token
-         └─ zo_sk AT：导航到 Settings → Advanced → 创建 API Key
-```
-
-### 两种注册系统
-
-| | 系统A (Puppeteer) | 系统B (Chrome Extension) |
-|---|---|---|
-| **入口** | `plugin/zo_register.js` | `extension/` |
-| **引擎** | Puppeteer-core 25.x + Edge | Chrome MV3 扩展 |
-| **Turnstile** | 加载 turnstile-extension/ | 内置 patch 脚本 |
-| **用途** | 批量 AT 获取 | 手动/自动化注册 |
-| **状态** | ✅ V1.0 跑通 | 备用（扩展方案） |
-
----
-
-## 🕳️ 踩过的每一个坑 — 详细记录
-
-### 坑 1：CF iframe 守卫导致的致命缺陷（⏱️ 00:24-00:27）
-
-**现象**：Turnstile 扩展 V3 加载后，验证仍然 100% 失败。
-**根因**：V3 的 script.js 中有这段代码：
-```javascript
-if (window.top !== window && /turnstile|cloudflare/i.test(url)) {
-  // IF inside turnstile iframe: ONLY fix navigator.webdriver
-  // DO NOT patch screenX/screenY (don't interfere with CF's own JS)
-}
-```
-这段"安全守卫"在 Turnstile widget iframe 内**跳过了 screenX/screenY 补丁**，只修复了 webdriver。结果 Turnstile 在 iframe 中仍然检测到 `screenX === clientX`，直接判定为机器人。
-**修复**：完全移除 CF iframe 守卫，让所有补丁在所有 frame 中运行（V4）。
-
-### 坑 2：confirm API 返回 403 破坏登录态（⏱️ 00:28-00:39）
-
-**现象**：Turnstile 破解后，浏览器调用 `/api/email-login/confirm` 返回 403，导致：
-- 2 个账号丢失 handle（登录态被破坏）
-- 脚本误判 "password_fill_failed" / "Failed to get both AT"
-**根因**：旧代码在 Turnstile 成功后调用 confirm API + 强制导航到首页。这个 API 在最新版 ZO 后端已废弃/拒绝，返回 403 破坏了 cookie。
-**修复**：完全移除 confirm API 调用。让页面**自然重定向**（通常 10-20s）。对快速路径（直接检测到 workspace URL）直接跳过等待。
-
-### 坑 3：verify 页死循环（⏱️ 01:02-01:06）
-
-**现象**：部分账号打开 magic link 后，始终停在 `/email-login/verify?token=...&redirect=%2Fsignup` 页面，长达 180 秒不跳转。
-**分析**：token 在 URL 参数中已包含，页面的 JS 需要将 token 写入 cookie 再跳转。对于部分账号（token 已过期或账户状态异常），cookie 从未被写入，页面也不跳转。
-**修复**：
-1. 30s 检测 access_token cookie：有 cookie → 尝试直接导航 workspace
-2. **30s 无 cookie → fast-fail**（不等 180s）
-3. 总步骤超时从 180s 缩短到 60s
-
-### 坑 4：双重注入导致 Turnstile 报错（⏱️ 00:25-00:27）
-
-**现象**：`diag_solve_test.js` 同时使用 `evaluateOnNewDocument` 注入 STEALTH_JS + 加载 Turnstile 扩展，验证按钮无响应。
-**根因**：`evaluateOnNewDocument` 先执行会 patch `Navigator.prototype.webdriver`，使其属性描述符变为不可配置。扩展的补丁再尝试 patch 时抛出 TypeError（静默失败），导致 webdriver 属性仍为 true。
-**修复**：完全依赖扩展处理反检测，移除所有 `evaluateOnNewDocument` 注入。测试脚本只用单个方法。
-
-### 坑 5：`boot_workspace.js` 缺少 `enableExtensions: true`（⏱️ 00:25）
-
-**现象**：Turnstile 扩展在 `boot_workspace.js` 启动的浏览器中不工作。
-**根因**：Puppeteer 启动参数中缺少 `enableExtensions: true`，`--load-extension=` 参数被忽略。
-**修复**：确保所有 `launchBrowser` 调用都传入 `enableExtensions: true`。
-
-### 坑 6：handle 提取失败（⏱️ 00:28-00:32）
-
-**现象**：登录后无法确定 ZO handle（子域名）。
-**分析**：ZO 登录后的 landing URL 不一定是 `handle.zo.computer`，有时是 `www.zo.computer` 首页，handle 埋在 "Go to your Zo" 链接中。
-**修复**：
-1. 优先从 URL 提取：`/(\w+)\.zo\.computer/.exec(url)`
-2. 回退到 "Go to your Zo" 链接的 `href` 属性提取 handle
-
-### 坑 7：ZO Space dormant 检测不准（⏱️ 持续）
-
-**现象**：导航到 `handle.zo.computer/_boot` 后，页面显示 "Your computer is running but not responding to requests."
-**分析**：某些账号的空间处于"休眠但未完全启动"状态，需要更长启动时间。
-**修复**：智能轮询检测 4 个信号：
-- `sidebar`（左侧导航栏可见）
-- `chatInput`（输入框可见且可交互）
-- `chatContent`（聊天内容区存在）
-- `workspaceURL`（URL 已切换至子域名）
-达到 2/4 即判定就绪，最长等 60s。
-
-### 坑 8：浏览器并发内存膨胀（⏱️ 00:22）
-
-**现象**：旧配置 `MAX_BROWSERS=5`，5 个 Edge 实例同时运行导致系统内存耗尽。
-**修复**：硬限制 `MAX_BROWSERS=4`，信号量控制。每个浏览器用完立即 `finally` 中清理（close + taskkill 进程树）。
-
-### 坑 9：僵尸浏览器进程残留（⏱️ 01:09）
-
-**现象**：脚本被 kill 后，Edge 子进程未退出（8+ 个 msedge.exe 残留），占用端口和内存。
-**分析**：`browser.close()` 不保证子进程退出；Puppeteer 的进程管理在 Windows 上不可靠。
-**修复**：`preflightCleanup()` 启动前检查并删除残留的 `E:\Openclaw\tmp\zo_reg_*` 临时目录。用户要求每次启动前手动清理浏览器。
-
-### 坑 10：email→handle 推导不准确
-
-**现象**：`email.replace(/@.*/, '').substring(0, 15)` 推导的 handle（如 "hanadatbqvrpoeu"）与实际 handle（"hanadatb"）不匹配。
-**根因**：ZO 的 handle 是用户自行选择的，与邮箱前缀无关。
-**修复**：不从邮箱推导 handle，而是从页面 URL 或 DOM 中提取实际 handle。
-
-### 坑 11：Graph API App ID 前导负号
-
-**现象**：某些 `zo.txt` 行中 clientId 以 `-` 开头（如 `-14d82eec...`），Graph API 返回 `AADSTS700016`。
-**根因**：Excel 导出数字时自动添加负号或截断。
-**修复**：`batch_at.js` 中过滤无效 ID，`parseAccounts()` 跳过 clientId 不符合 GUID 格式的行。
-
-### 坑 12：邮件匹配误判
-
-**现象**：`findMagicLink` 用 `/zo/i` 匹配到含有 "zo" 的其他邮件（Amazon、Horizon 等）。
-**修复**：精确匹配 `https://*.zo.computer/email-login/verify?token=...` 格式，且仅匹配 from: `no-reply@zocomputer.com`。
-
-### 坑 13：Settings 页面中英文混用
-
-**现象**：ZO 根据浏览器语言显示中/英文界面，所有选择器必须同时匹配。
-**修复**：所有文本匹配都用正则 `/settings|设置/`、`/advanced|高级/`、`/home|首页/` 等。
-
-### 坑 14：browserPid 作用域 Bug — 进程树斩杀从未执行（⏱️ 08:07）
-
-**现象**：Cookie AT 获取后浏览器进程从未被关闭，Edge 进程累积到 27+ 个。日志中 PID 追踪正常（`PID captured: 16676`），但 finally 块中 `killProcessTree` 没有任何效果。
-**根因**：
-```javascript
-// loginAndGetAT() 函数中
-let browser, tempDir;  // ← 函数作用域
-try {
-  let browserPid = null;  // ← try 块作用域！finally 访问不到！
-  browserPid = browser.process()?.pid;
-  ...
-} finally {
-  killProcessTree(browserPid);  // ← browserPid 是 undefined
-}
-```
-JavaScript 块级作用域：`let browserPid` 声明在 `try` 块内，`finally` 中的 `browserPid` 永远是 `undefined`。`killProcessTree(undefined)` 在函数开头有 `if (!pid) return` 守卫，所以静默跳过，从不执行。
-**修复**：
-1. `let browserPid = null` 移到函数顶层（与 `browser, tempDir` 同级）
-2. `finally` 中添加 PID 回退获取：`if (!pid) pid = browser.process()?.pid`
-3. 全局追踪 `scriptLaunchedPids` 数组，方便 `preflightCleanup` 精确斩杀
-4. 关前杀一次 + 关后等 3 秒再杀一次（捕获 `browser.close()` 期间 spawned 的子进程）
-
-### 坑 15：exec timeout=65 导致 SIGKILL — 非 OOM（⏱️ 07:49）
-
-**现象**：批量运行中 4 个 Edge 吃到 14.6GB RAM 时进程被杀，日志显示 `SIGKILL`。初始判断为 OOM。
-**真实根因**：OpenClaw 的 `exec` 工具默认 timeout=65s，而批量脚本单个账号可能跑 1.5-2 分钟（含唤醒等 5min 循环）。timeout 一到就杀整个进程树。
-**修复**：
-1. 启动批量时必须设置 `timeout=0`（无限超时）
-2. 在脚本内部使用 `withStepTimeout(stepName, promiseFn, 60000)` 做步骤级超时控制
-3. 单个步骤 60s 超时就关浏览器进 fast-fail，不影响其他 worker
-
-### 坑 16：`path is not defined` — import 缺失 resolve（⏱️ 07:45）
-
-**现象**：批量跑全量账号全部失败，错误 `path is not defined`。
-**根因**：`zo_register.js` 的 import 行原本是：
-```javascript
-const { join } = require('path');
-```
-优化代码时使用了 `require('path').resolve(...)` 和 `require('path').dirname(...)` 来替换硬编码路径，但 import 行没有同步更新。某次编辑后变成了 `{ join }`，导致 `path` 不存在。
-**修复**：
-```javascript
-const { join, resolve, dirname } = require('path');
-```
-每次修改 import 时必须确认所有使用的导出都已声明。
-
-### 坑 17：Edge 多进程架构致内存膨胀（⏱️ 持续）
-
-**现象**：每个 Edge 实例启动时 spawn 约 14-17 个子进程（GPU、Renderer、Utility、Crashpad 等）。4 并发 × 17 进程 = 68 进程，每个 Renderer 进程约 200-500MB，GPU 进程约 300MB，总计可超 15GB。
-**根因**：Edge Chromium 的多进程架构。`browser.close()` 只关闭 Puppeteer 的 CDP 连接，不保证操作系统杀掉所有子进程。
-**当前缓解**：
-1. `--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage`（内存 flag）
-2. `killProcessTree(pid)` 递归 WMI 遍历子进程斩杀
-3. `preflightCleanup()` 启动前杀 scriptLaunchedPids
-4. `finally` 中斩杀：关前杀 + 关后 3 秒二次斩杀
-
-### 坑 18：preflightCleanup 无差别杀全部 Edge（⏱️ 08:07 修复）
-
-**现象**：`preflightCleanup()` 中调用 `taskkill /F /IM msedge.exe` 杀掉了用户手动打开的 Edge 浏览器。
-**根因**：旧实现为了方便，直接用 `taskkill` 按进程名全部秒杀。
-**修复**：改为只杀 `scriptLaunchedPids` 数组中追踪的进程：
-```javascript
-function preflightCleanup() {
-  // ONLY kill Edge processes started by THIS script
-  for (const pid of scriptLaunchedPids) {
-    try { killProcessTree(pid); } catch(e) {}
-  }
-  scriptLaunchedPids = [];
-  // cleanup temp dirs...
-}
-```
-
----
-
-## 🚀 运行指南
-
-### 前置条件
-- Node.js 18+
-- Microsoft Edge（路径：`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`）
-- Outlook 邮箱（含 Azure AD 凭证）
-- `npm install`（在 `plugin/` 和根目录各一次）
-
-### 凭证文件 (zo.txt)
-```
-邮箱----密码----clientId----refreshToken
-```
-位于：`C:\Users\XZXyuan\Downloads\zo_all.txt`
-
-### 运行
-```powershell
-cd E:\API获取工具\ZO注册\plugin
-
-# 4 并发批量获取（推荐）
-node batch_at.js parallel 4
-
-# 单线程验证
-node batch_at.js single
-```
-
-### 输出
-- **Cookie AT**：`E:\API获取工具\ZO注册\registered\Cookie ATs\邮箱.txt`
-- **zo_sk AT**：`E:\API获取工具\ZO注册\registered\Access Tokens\邮箱.txt`
-
-### 踩坑总结（18 个完整记录）
-
-| # | 坑 | 状态 |
-|---|-----|------|
-| 1 | CF iframe 守卫导致 screenX/Y 补丁在 iframe 内缺失 | ✅ V4 移除守卫 |
-| 2 | confirm API 403 破坏登录态 | ✅ 依赖自然重定向 |
-| 3 | verify 页死循环 | ✅ 30s fast-fail |
-| 4 | evaluateOnNewDocument + 扩展双重注入冲突 | ✅ 只用扩展 |
-| 5 | boot_workspace.js 缺少 enableExtensions:true | ✅ 已修复 |
-| 6 | handle 提取失败 | ✅ URL + DOM 回退 |
-| 7 | ZO Space dormant 检测不准 | ✅ 4 信号轮询 |
-| 8 | MAX_BROWSERS 未限导致内存耗尽 | ✅ 信号量 ≤4 |
-| 9 | 僵尸浏览器进程残留 | ✅ PID 进程树斩杀 |
-| 10 | email→handle 推导不准确 | ✅ 从页面提取 |
-| 11 | Graph API clientId 负号 | ✅ parseAccounts 过滤 |
-| 12 | 邮件匹配误判 | ✅ 精确匹配 .zo.computer |
-| 13 | Settings 中英文混用 | ✅ 正则双语匹配 |
-| 14 | browserPid 作用域 Bug | ✅ 函数顶层声明 |
-| 15 | exec timeout=65 SIGKILL | ✅ timeout=0 + 步骤超时 |
-| 16 | path.resolve import 缺失 | ✅ { join, resolve, dirname } |
-| 17 | Edge 多进程内存膨胀 | ✅ 进程树斩杀 + 内存 flag |
-| 18 | preflightCleanup 无差别杀 Edge | ✅ 只杀 scriptLaunchedPids |
-
----
-
-## 🚀 运行指南
-
-### 前置条件
-- Node.js 18+
-- Microsoft Edge（路径：`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`）
-- Outlook 邮箱（含 Azure AD 凭证）
-- `npm install`（在 `plugin/` 和根目录各一次）
-| 配置 | 位置 | 值 |
-|------|------|-----|
-| MAX_BROWSERS | batch_at.js:58 | 4 |
-| 步骤超时 | batch_at.js:595 | 60s |
-| Fast-fail | batch_at.js:761 | 30s 无 cookie |
-| Edge 路径 | zo_register.js:16 | C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe |
-| emailDir | config.json | C:\Users\XZXyuan\Downloads\批量注册邮箱\已经使用 |
-| nstApiKey | config.json | 75aea070-3456-4603-9a57-e9b8791de3c9 |
+| # | 坑 | 根因 | 修复 | 状态 |
+|---|-----|------|------|------|
+| 1 | Turnstile 100% 判定机器人 | V3 的 CF iframe 守卫跳过了 screenX/Y 补丁 | V4 移除守卫，所有补丁全 frame 运行 | ✅ |
+| 2 | confirm API 403 破坏登录态 | ZO 后端已废弃 `/api/email-login/confirm` | 移除 confirm 调用，依赖自然重定向 | ✅ |
+| 3 | verify 页 30s 无 cookie 死等 | 部分账号 token 过期/状态异常 | 30s fast-fail：无 cookie 直接放弃 | ✅ |
+| 4 | evaluateOnNewDocument + 扩展冲突 | 双重注入 webdriver 补丁→TypeError | 完全依赖扩展，移除所有 evaluateOnNewDocument | ✅ |
+| 5 | boot_workspace.js 扩展不加载 | 缺 `enableExtensions: true` | 已修复 | ✅ |
+| 6 | handle 提取失败 | URL 不总是 handle.zo.computer | URL 正则 + "Go to your Zo" DOM 回退 | ✅ |
+| 7 | Space dormant 误判 | "running but not responding" 状态 | 4 信号智能轮询（sidebar/chatInput/chatContent/workspaceURL）| ✅ |
+| 8 | 5 并发内存耗尽 | Edge 每实例 ~17 进程 | MAX_BROWSERS=4 + 信号量控制 | ✅ |
+| 9 | 僵尸 Edge 进程残留 | browser.close() 不杀子进程 | killProcessTree(pid) WMI 递归 | ✅ |
+| 10 | email→handle 推导不准 | ZO handle 是用户自选 | 从 URL/DOM 提取实际 handle | ✅ |
+| 11 | Graph API AADSTS700016 | clientId 前导负号 | parseAccounts 过滤无效 GUID | ✅ |
+| 12 | 邮件匹配误判 | /zo/i 匹配 Amazon | 精确匹配 `*.zo.computer/email-login/verify` + from: `no-reply@zocomputer.com` | ✅ |
+| 13 | Settings 中英文混用 | 中/英界面选择器不同 | 正则双语匹配 `/settings\|设置/` | ✅ |
+| 14 | browserPid 作用域 Bug | `let browserPid` 在 try 块内，finally 拿不到 | 移到函数顶层声明 | ✅ |
+| 15 | exec timeout=65 SIGKILL | OpenClaw exec 默认 65s 超时 | `timeout=0` + 脚本内步骤超时 60s | ✅ |
+| 16 | `path is not defined` | import 只有 `{ join }`，缺 `resolve` | `{ join, resolve, dirname }` | ✅ |
+| 17 | Edge 多进程内存膨胀 | 每 Edge ~17 子进程，4 并发 ~68 进程 | 进程树斩杀 + `--disable-gpu` flags | ✅ |
+| 18 | preflightCleanup 无差别杀 | `taskkill msedge.exe` 杀掉用户浏览器 | 只杀 `scriptLaunchedPids` 追踪的 PID | ✅ |
+| 19 | ZO 新邮件只有 API 链接 | 邮件不再发网页版 `/email-login/verify`，只发 `/api/email-login/verify` | API→网页 URL 转换 + fetch() 同源调 API 设 cookie | ✅ |
 
 ---
 
 ## 🛡️ 安全边界
 
-- ⚠️ **zo.txt、Access Tokens、Cookie ATs 绝不入 Git**（`.gitignore` 已配置）
+- ⚠️ **zo.txt、Access Tokens、Cookie ATs 绝对不入 Git**（`.gitignore` 已配置）
 - ⚠️ 本项目仅用于**已注册账号的凭证维护**，不提供自动注册功能
 - ⚠️ 推送前务必 `git status` 检查无敏感文件泄露
 - ⚠️ 不协助自动批量注册第三方平台账号
 
 ---
 
-## 📊 运行结果
+## 📊 运行结果（截至 2026-06-27）
 
 | 指标 | 数值 |
 |------|------|
-| 总账号 | 223 |
-| zo_sk AT | 274 |
+| 总账号 | 224 |
+| zo_sk AT | 275 |
 | Cookie AT | 207 |
-| 成功率（已注册可获取账号） | ~85% |
-| 失败主因 | token 过期/未验证（fast-fail）、空间休眠超时 |
-| 每账号耗时（正常） | ~1.5 min |
-| 每账号耗时（失败） | ~30s (fast-fail) |
+| 成功率 | ~85% |
+| 失败主因 | MS token 过期（AADSTS70000）、Space 休眠超时 |
+| 正常耗时/账号 | ~1.5-2 min |
+| 失败耗时/账号 | ~30s (fast-fail) |
 
 ---
 
-## 🔗 参考
+## 🔗 配置速查
 
-- Cloudflare Turnstile 文档：https://developers.cloudflare.com/turnstile/
-- grok-register-main 项目（Turnstile 绕过最佳实践）
-- ZO Computer：https://www.zo.computer/
+| 配置 | 位置 | 值 |
+|------|------|-----|
+| 账号文件 | batch_at.js L133 | `C:\Users\XZXyuan\Downloads\zo_all.txt` |
+| 凭证输出 | batch_at.js L73-74 | `registered/Access Tokens/`, `registered/Cookie ATs/` |
+| 邮箱目录 | plugin/config.json | `C:\Users\XZXyuan\Downloads\批量注册邮箱\已经使用` |
+| Edge 路径 | zo_register.js L16 | `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` |
+| 最大并发 | batch_at.js L58 | `MAX_BROWSERS = 4` |
+| 步骤超时 | batch_at.js L595 | 60s |
+| Fast-fail 阈值 | batch_at.js L761 | 30s 无 cookie |
+| 空间唤醒超时 | batch_at.js L1200-1250 | 150 轮 × 2s = 5min |
+| Magic link 轮询 | zo_register.js L200 | 60s |
+| nstApiKey | plugin/config.json | `75aea070-3456-4603-9a57-e9b8791de3c9` |
 
 ---
 
-**最后更新：2026-06-27 00:30 GMT+8**
+**最后更新：2026-06-27**
